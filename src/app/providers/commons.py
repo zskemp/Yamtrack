@@ -7,6 +7,7 @@ from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
 import requests
+from bs4 import BeautifulSoup
 from django.core.cache import cache
 from django.utils import timezone
 from django.utils.html import strip_tags
@@ -16,7 +17,8 @@ from app.providers import services
 
 logger = logging.getLogger(__name__)
 BASE_URL = "https://commons.wikimedia.org/w/api.php"
-POLICY_VERSION = 3
+POLICY_VERSION = 5
+LEGACY_POLICY_VERSION = 3
 MIN_IMAGE_DIMENSION = 200
 
 
@@ -47,47 +49,36 @@ WARNING_PATTERNS = (
     "permission pending",
     "permission received",
     "disputed",
-    "personality rights",
-    "trademark",
     "license review needed",
     "license review failed",
     "unreviewed",
+    "pd old auto: no death date",
+    "pd-old-auto without death date",
 )
-ALLOWED_TEMPLATES = {
-    "information",
-    "artwork",
-    "photograph",
-    "self",
-    "own",
-    "en",
-    "de",
-    "fr",
-    "es",
-    "it",
-    "ru",
-    "cc-by-sa-4.0",
-    "cc-by-sa-3.0",
-    "cc-by-4.0",
-    "cc-by-2.0",
-    "cc-zero",
-    "cc-by-sa-layout",
-    "cc-by-layout",
-    "cc-zero-layout",
-    "license template tag",
-    "infobox template tag",
-    "flickrreview",
-    "flickr",
-    "flickr uploaded by",
-    "location",
-    "object location",
-    "taken on",
-    "according to exif data",
-    "int",
-    "lang",
-    "original upload log",
-    "pd-self",
-    "gfdl",
-    "gfdl-1.2",
+PUBLIC_DOMAIN_BASES = {
+    "pd-textlogo": (
+        "Simple text/logo below the copyright originality threshold; "
+        "trademark rights may still apply."
+    ),
+    "pd-old-auto-expired": (
+        "Commons identifies expired copyright in the source country and the "
+        "United States; other jurisdictions may differ."
+    ),
+    "pd-old-100-expired": (
+        "Commons identifies an author deceased over 100 years ago and "
+        "expired United States copyright."
+    ),
+    "pd-old-70-expired": (
+        "Commons identifies an author deceased over 70 years ago and expired "
+        "United States copyright; longer terms may apply elsewhere."
+    ),
+}
+STANDARD_RESTRICTIONS = {
+    "personality",
+    "personality rights",
+    "trademark",
+    "trademarked",
+    "costume",
 }
 
 
@@ -142,16 +133,6 @@ def credit_text(value):
     return "".join(parser.parts).strip()
 
 
-def known_templates(page):
-    """Unknown file notices require review instead of silently passing."""
-    return all(
-        not entry["title"].startswith("Template:")
-        or entry["title"].removeprefix("Template:").casefold().replace("_", " ")
-        in ALLOWED_TEMPLATES
-        for entry in page.get("templates", [])
-    )
-
-
 def safe_url(value, host):
     """Accept only the expected HTTPS source without credentials or custom ports."""
     if not isinstance(value, str):
@@ -168,6 +149,99 @@ def text(value):
     return unescape(strip_tags(value)).strip()
 
 
+def reuse_grant(value, tags):
+    """Use explicit source grants or named public-domain bases, not availability."""
+    if value.get("Copyrighted", "").casefold() == "false":
+        for template, notice in PUBLIC_DOMAIN_BASES.items():
+            if f"template:{template}" in tags:
+                return {
+                    "license": "Public domain",
+                    "license_url": f"https://commons.wikimedia.org/wiki/Template:{template}",
+                    "basis": template,
+                    "basis_notice": notice,
+                }
+    license_url = value.get("LicenseUrl", "").replace("http://", "https://", 1)
+    parsed = urlsplit(
+        license_url if safe_url(license_url, "creativecommons.org") else ""
+    )
+    license_path = parsed.path.rstrip("/") + "/"
+    license_entry = LICENSES.get(license_path)
+    if not license_entry or parsed.query:
+        return None
+    license_name, template = license_entry
+    if not any(
+        tag == f"template:{template.casefold()}"
+        or tag.startswith(f"template:{template.casefold()}-migrated")
+        for tag in tags
+    ):
+        return None
+    if not value.get("Artist") or value["Artist"].casefold() in {
+        "unknown",
+        "unknown author",
+        "anonymous",
+    }:
+        return None
+    return {
+        "license": license_name,
+        "license_url": "https://creativecommons.org" + license_path,
+        "basis": "",
+        "basis_notice": "",
+    }
+
+
+def reuse_notices(value, tags):
+    """Keep standard notices; unknown substantive restrictions require review."""
+    restrictions = {
+        entry.strip().casefold()
+        for entry in value.get("Restrictions", "").split("|")
+        if entry.strip()
+    }
+    if restrictions - STANDARD_RESTRICTIONS:
+        return None
+    for template, restriction in [
+        ("personality rights", "personality"),
+        ("trademarked", "trademark"),
+        ("costume", "costume"),
+    ]:
+        if f"template:{template}" in tags:
+            restrictions.add(restriction)
+    notices = []
+    if restrictions:
+        notices.append(
+            "Source notices: "
+            + ", ".join(sorted(restrictions))
+            + ". Copyright permission does not grant endorsement, personality, "
+            "trademark or separate design rights. See the source file for "
+            "use-specific restrictions."
+        )
+    if any("migrated-with-disclaimers" in tag for tag in tags):
+        if not value.get("LicenseNotices"):
+            return None
+        notices.append(value["LicenseNotices"])
+    return " ".join(notices)
+
+
+def license_notices(page, license_name):
+    """Capture file-specific migrated-license notices from the rendered grant."""
+    response = request_data(
+        {
+            "action": "parse",
+            "pageid": page["pageid"],
+            "prop": "text",
+            "disablelimitreport": 1,
+        }
+    )
+    parsed = response.get("parse", {})
+    if parsed.get("revid") and page.get("lastrevid") != parsed["revid"]:
+        return ""
+    soup = BeautifulSoup(parsed.get("text", {}).get("*", ""), "html.parser")
+    for block in soup.select(".licensetpl"):
+        name = block.select_one(".licensetpl_short")
+        if name and name.get_text(strip=True) == license_name:
+            return credit_text(str(block))
+    return ""
+
+
 def qualified_image(page):
     """Reject incomplete rights information and known warning categories/templates."""
     info = next(iter(page.get("imageinfo", [])), {})
@@ -177,8 +251,6 @@ def qualified_image(page):
     }
     if (
         "badfile" in info
-        or not known_templates(page)
-        or value.get("Restrictions")
         or value.get("DeletionReason")
         or value.get("NonFree", "").lower() in {"true", "1", "yes"}
     ):
@@ -188,30 +260,15 @@ def qualified_image(page):
         for kind in ("categories", "templates")
         for entry in page.get(kind, [])
     ]
-    if "template:costume" in tags or any(
-        pattern in tag for tag in tags for pattern in WARNING_PATTERNS
-    ):
+    if any(pattern in tag for tag in tags for pattern in WARNING_PATTERNS):
         return None
-    license_url = value.get("LicenseUrl", "").replace("http://", "https://", 1)
-    parsed = urlsplit(
-        license_url if safe_url(license_url, "creativecommons.org") else ""
-    )
-    license_path = parsed.path.rstrip("/") + "/"
-    license_entry = LICENSES.get(license_path)
-    if (
-        not safe_url(license_url, "creativecommons.org")
-        or not license_entry
-        or parsed.query
-    ):
+    grant = reuse_grant(value, tags)
+    if grant and any("migrated-with-disclaimers" in tag for tag in tags):
+        value["LicenseNotices"] = license_notices(page, grant["license"])
+    notices = reuse_notices(value, tags)
+    if grant is None or notices is None:
         return None
-    license_name, template = license_entry
     artist = value.get("Artist", "")
-    if (
-        not any(tag == f"template:{template.casefold()}" for tag in tags)
-        or not artist
-        or artist.casefold() in {"unknown", "unknown author", "anonymous"}
-    ):
-        return None
     image_url = info.get("thumburl") or info.get("url", "")
     source_url = info.get("descriptionurl", "")
     width, height = info.get("width", 0), info.get("height", 0)
@@ -238,8 +295,8 @@ def qualified_image(page):
         "credit": value.get("Credit", ""),
         "attribution": value.get("Attribution", ""),
         "permission": value.get("Permission", ""),
-        "license": license_name,
-        "license_url": "https://creativecommons.org" + license_path,
+        **grant,
+        "notices": notices,
         "page_id": page["pageid"],
         "revision": page.get("lastrevid"),
         "sha1": info.get("sha1", ""),
@@ -248,6 +305,7 @@ def qualified_image(page):
         "width": width,
         "height": height,
         "rights": value,
+        "source_tags": tags,
         "policy": POLICY_VERSION,
     }
 
@@ -270,7 +328,6 @@ def restored_artwork(artwork, work_id, image):
         "image",
         "source_url",
         "title",
-        "artist",
         "license",
         "license_url",
         "work_id",
@@ -287,8 +344,19 @@ def restored_artwork(artwork, work_id, image):
         "https://creativecommons.org" + path: name
         for path, (name, _template) in LICENSES.items()
     }
+    invalid_legacy = artwork.get("policy") == LEGACY_POLICY_VERSION and (
+        not artwork.get("artist")
+        or valid_licenses.get(artwork["license_url"]) != artwork["license"]
+    )
+    valid_licenses.update(
+        {
+            f"https://commons.wikimedia.org/wiki/Template:{basis}": "Public domain"
+            for basis in PUBLIC_DOMAIN_BASES
+        }
+    )
     if (
-        valid_licenses.get(artwork["license_url"]) != artwork["license"]
+        invalid_legacy
+        or valid_licenses.get(artwork["license_url"]) != artwork["license"]
         or not safe_url(artwork["source_url"], "commons.wikimedia.org")
         or not any(
             safe_url(image, host)
@@ -307,7 +375,20 @@ def restored_artwork(artwork, work_id, image):
 def complete_credit(artwork):
     """Require the complete exported rights record, not just a license label."""
     rights = artwork.get("rights")
-    if not isinstance(rights, dict) or artwork.get("policy") != POLICY_VERSION:
+    if not isinstance(rights, dict) or artwork.get("policy") not in {
+        3,
+        4,
+        POLICY_VERSION,
+    }:
+        return False
+    if artwork.get("policy") != LEGACY_POLICY_VERSION and any(
+        not isinstance(artwork.get(key), str)
+        for key in ("notices", "basis", "basis_notice")
+    ):
+        return False
+    if artwork.get("policy") != LEGACY_POLICY_VERSION and not consistent_reuse_record(
+        artwork
+    ):
         return False
     fields = {
         "artist": "Artist",
@@ -330,6 +411,23 @@ def complete_credit(artwork):
             "evidence",
             "work_revision",
         )
+    )
+
+
+def consistent_reuse_record(artwork):
+    """Keep notices and public-domain bases consistent with exported evidence."""
+    tags = artwork.get("source_tags")
+    rights = artwork.get("rights")
+    if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+        return False
+    if not all(isinstance(value, str) for value in rights.values()):
+        return False
+    grant = reuse_grant(rights, tags)
+    return (
+        grant is not None
+        and all(artwork.get(key) == value for key, value in grant.items())
+        and artwork.get("notices") == reuse_notices(rights, tags)
+        and not any(pattern in tag for tag in tags for pattern in WARNING_PATTERNS)
     )
 
 
@@ -458,10 +556,10 @@ def suitable_for_work(page, work_forms, *, enrichment=False):
 
 
 def select_artwork(work_id, filenames, revision, work_forms):
-    """Select a reusable direct work image, bounded to three candidates."""
-    filenames = sorted(
-        {filename for filename in filenames if isinstance(filename, str)}
-    )[:3]
+    """Select a reusable work image from at most five direct candidates."""
+    filenames = list(
+        dict.fromkeys(filename for filename in filenames if isinstance(filename, str))
+    )[:5]
     key = f"commons_v{POLICY_VERSION}_{work_id}"
     cached = cache.get(key)
     if (
@@ -476,7 +574,7 @@ def select_artwork(work_id, filenames, revision, work_forms):
         if suitable_for_work(page, work_forms)
     ]
     candidates = [candidate for candidate in candidates if candidate]
-    evidence = "P18"
+    evidence = "P18/P154"
     if not candidates:
         evidence = "P180"
         for page in image_pages(depicted_files(work_id)):

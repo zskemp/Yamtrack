@@ -14,6 +14,7 @@ from django.utils import timezone
 from playwright.sync_api import expect, sync_playwright
 
 from app.models import Item, Theater
+from lists.models import CustomList
 
 
 class IntegrationTest(StaticLiveServerTestCase):
@@ -75,12 +76,126 @@ class IntegrationTest(StaticLiveServerTestCase):
                 self.page.get_by_role("button", name="Add", exact=True).click()
                 expect(self.page.get_by_role("main")).to_contain_text("Second Theatre")
                 expect(self.page.get_by_role("main")).to_contain_text("First Theatre")
+                self.page.get_by_title("Edit entry", exact=True).click()
+                self.page.get_by_label("Venue", exact=True).fill("Revised Theatre")
+                self.page.get_by_label("Notes", exact=True).fill(
+                    "Earlier visit corrected"
+                )
+                self.page.get_by_role("button", name="Update", exact=True).click()
+                expect(self.page.get_by_role("main")).to_contain_text("Revised Theatre")
+                expect(self.page.get_by_role("main")).to_contain_text("Second Theatre")
+                self.page.goto(f"{self.live_server_url}/journal")
+                expect(self.page.get_by_role("main")).to_contain_text(
+                    "Updated venue from First Theatre to Revised Theatre",
+                )
                 self.assertTrue(
                     self.page.evaluate(
                         "document.documentElement.scrollWidth <= window.innerWidth",
                     ),
                 )
         self.page.set_viewport_size({"width": 1280, "height": 720})
+
+    def test_theater_library_filter_and_custom_list(self):
+        """Organize manual works through existing library and list controls."""
+        for title, status in [("Alpha Stage", "Completed"), ("Beta Stage", "Planning")]:
+            item = Item.objects.create(
+                title=title,
+                media_id=Item.generate_manual_id(),
+                source="manual",
+                media_type="theater",
+                image=settings.IMG_NONE,
+                theater_forms=["play"],
+            )
+            Theater.objects.create(item=item, user=self.user, status=status)
+        custom_list = CustomList.objects.create(name="Stage Library", owner=self.user)
+        try:
+            for width in (1280, 390):
+                with self.subTest(width=width):
+                    self.page.set_viewport_size({"width": width, "height": 900})
+                    self.page.goto(
+                        f"{self.live_server_url}/test/theater?status=All&layout=grid"
+                    )
+                    self.page.get_by_role("button", name="All", exact=True).click()
+                    self.page.get_by_role(
+                        "button", name="Completed", exact=True
+                    ).click()
+                    expect(
+                        self.page.get_by_title("Beta Stage", exact=True)
+                    ).to_have_count(0)
+                    self.page.get_by_title("Alpha Stage", exact=True).click()
+                    self.page.get_by_role(
+                        "button", name="Add to lists", exact=True
+                    ).click()
+                    self.page.get_by_role("button", name="Add", exact=True).click()
+                    expect(
+                        self.page.get_by_role("button", name="Remove", exact=True)
+                    ).to_be_visible()
+                    self.page.goto(f"{self.live_server_url}/list/{custom_list.pk}")
+                    expect(
+                        self.page.get_by_title("Alpha Stage", exact=True)
+                    ).to_have_count(1)
+                    self.page.get_by_title("Alpha Stage", exact=True).click()
+                    self.page.get_by_role(
+                        "button", name="Add to lists", exact=True
+                    ).click()
+                    self.page.get_by_role("button", name="Remove", exact=True).click()
+                    self.page.goto(f"{self.live_server_url}/list/{custom_list.pk}")
+                    expect(
+                        self.page.get_by_title("Alpha Stage", exact=True)
+                    ).to_have_count(0)
+                    self.assertTrue(
+                        self.page.evaluate(
+                            "document.documentElement.scrollWidth <= window.innerWidth"
+                        )
+                    )
+        finally:
+            self.page.set_viewport_size({"width": 1280, "height": 720})
+
+    def test_theater_export_upload_restores_separate_visits(self):
+        """The browser backup/upload flow restores two visits for the importing user."""
+        item = Item.objects.create(
+            title="Portable Stage Work",
+            media_id=Item.generate_manual_id(),
+            source="manual",
+            media_type="theater",
+            image=settings.IMG_NONE,
+            theater_forms=["play", "musical"],
+        )
+        for venue in ("First Theatre", "Second Theatre"):
+            Theater.objects.create(item=item, user=self.user, venue=venue, notes=venue)
+        self.page.goto(f"{self.live_server_url}/settings/export")
+        with self.page.expect_download() as download_info:
+            self.page.get_by_role("button", name="Export as CSV", exact=True).click()
+        backup = download_info.value.path()
+        try:
+            for width in (1280, 390):
+                username = f"restore{width}"
+                get_user_model().objects.create_user(
+                    username=username, password=self.credentials["password"]
+                )
+                self.page.context.clear_cookies()
+                self.page.set_viewport_size({"width": width, "height": 900})
+                self.page.goto(f"{self.live_server_url}/accounts/login/")
+                self.page.get_by_placeholder("Enter your username").fill(username)
+                self.page.get_by_placeholder("Enter your password").fill(
+                    self.credentials["password"]
+                )
+                self.page.get_by_role("button", name="Sign In", exact=True).click()
+                self.page.goto(f"{self.live_server_url}/settings/import")
+                self.page.locator('input[name="yamtrack_csv"]').set_input_files(backup)
+                self.page.wait_for_load_state("networkidle")
+                self.page.goto(f"{self.live_server_url}/{username}/theater")
+                self.page.get_by_title("Portable Stage Work", exact=True).click()
+                expect(self.page.get_by_role("main")).to_contain_text("First Theatre")
+                expect(self.page.get_by_role("main")).to_contain_text("Second Theatre")
+                expect(self.page.get_by_role("main")).to_contain_text("Play, Musical")
+                self.assertTrue(
+                    self.page.evaluate(
+                        "document.documentElement.scrollWidth <= window.innerWidth"
+                    )
+                )
+        finally:
+            self.page.set_viewport_size({"width": 1280, "height": 720})
 
     def test_theater_search_artwork_and_tracking(self):
         """Provider search and saved artwork retain readable credits on both sizes."""

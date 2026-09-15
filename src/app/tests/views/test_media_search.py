@@ -218,6 +218,225 @@ class TheaterDiscoveryTests(TestCase):
         response._content = json.dumps(data).encode()
         return response
 
+    def test_public_domain_logo_and_standard_notices_remain_usable(self):
+        """Published public-domain bases and standard notices do not hide images."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )
+        self.entities["Q822850"] = fixture["work"]
+        self.search_ids = ["Q822850"]
+        page = fixture["commons"]["query"]["pages"]["123"]
+        metadata = page["imageinfo"][0]["extmetadata"]
+        page["templates"] = [
+            {"title": "Template:PD-textlogo"},
+            {"title": "Template:LangSwitch"},
+        ]
+        metadata.pop("LicenseUrl")
+        metadata["LicenseShortName"] = {"value": "Public domain"}
+        metadata["Copyrighted"] = {"value": "False"}
+
+        def source_response(url, params, **kwargs):
+            if "commons.wikimedia.org" not in url:
+                return self.source_response(url, params, **kwargs)
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(fixture["commons"]).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+            )
+            self.assertContains(response, page["imageinfo"][0]["url"])
+            self.assertContains(response, "Public domain")
+            self.assertContains(response, "originality")
+            page["templates"] = [{"title": "Template:PD-old-auto-expired"}]
+            page["categories"] = [{"title": "Category:PD Old auto: no death date"}]
+            cache.clear()
+            rejected = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+            )
+            self.assertNotContains(rejected, page["imageinfo"][0]["url"])
+            page["templates"] = [{"title": "Template:PD-textlogo"}]
+            page["categories"] = []
+            cache.clear()
+            self.client.post(
+                reverse("media_save"),
+                {
+                    "media_id": "Q822850",
+                    "source": "wikidata",
+                    "media_type": "theater",
+                    "status": "Completed",
+                    "notes": "Public domain artwork round trip",
+                },
+            )
+            exported = b"".join(
+                self.client.get(reverse("export_csv")).streaming_content
+            )
+            Item.objects.get(media_id="Q822850").delete()
+            with patch(
+                "app.providers.services.session.get",
+                side_effect=AssertionError("Restore must stay offline"),
+            ):
+                self.client.post(
+                    reverse("import_yamtrack"),
+                    {
+                        "mode": "new",
+                        "yamtrack_csv": SimpleUploadedFile("theater.csv", exported),
+                    },
+                )
+            restored = Item.objects.get(media_id="Q822850")
+            self.assertEqual(restored.theater_artwork["basis"], "pd-textlogo")
+            self.assertEqual(restored.image, page["imageinfo"][0]["url"])
+            page["templates"] = [
+                {"title": "Template:Cc-by-sa-4.0"},
+                {"title": "Template:Personality rights"},
+                {"title": "Template:ISOdate"},
+            ]
+            metadata["LicenseShortName"] = {"value": "CC BY-SA 4.0"}
+            metadata["LicenseUrl"] = {
+                "value": "https://creativecommons.org/licenses/by-sa/4.0/"
+            }
+            metadata["Restrictions"] = {"value": "personality|trademark"}
+            cache.clear()
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+            )
+            self.assertContains(response, page["imageinfo"][0]["url"])
+            self.assertContains(response, "personality")
+            page["templates"].append({"title": "Template:No permission since"})
+            cache.clear()
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+            )
+            self.assertNotContains(response, page["imageinfo"][0]["url"])
+
+    def test_migrated_license_preserves_file_specific_disclaimer(self):
+        """Migrated image grants retain the actual source disclaimer URL."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )
+        self.entities["Q822850"] = fixture["work"]
+        self.search_ids = ["Q822850"]
+        page = fixture["commons"]["query"]["pages"]["123"]
+        page["templates"] = [
+            {"title": "Template:Cc-by-sa-3.0-migrated-with-disclaimers"}
+        ]
+        metadata = page["imageinfo"][0]["extmetadata"]
+        metadata["LicenseUrl"] = {
+            "value": "https://creativecommons.org/licenses/by-sa/3.0/"
+        }
+        metadata["LicenseShortName"] = {"value": "CC BY-SA 3.0"}
+        disclaimer = "https://en.wikipedia.org/wiki/Wikipedia:General_disclaimer"
+
+        def source_response(url, params, **kwargs):
+            if "commons.wikimedia.org" not in url:
+                return self.source_response(url, params, **kwargs)
+            response = requests.Response()
+            response.status_code = 200
+            payload = (
+                {
+                    "parse": {
+                        "text": {
+                            "*": '<table class="licensetpl">'
+                            '<span class="licensetpl_short">CC BY-SA 3.0</span>'
+                            ' Subject to <a href="'
+                            + disclaimer
+                            + '">disclaimers</a>.</table>'
+                        }
+                    }
+                }
+                if params["action"] == "parse"
+                else fixture["commons"]
+            )
+            response._content = json.dumps(payload).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+            )
+            self.assertContains(response, disclaimer)
+            self.client.post(
+                reverse("media_save"),
+                {
+                    "media_id": "Q822850",
+                    "media_type": "theater",
+                    "source": "wikidata",
+                    "status": "Completed",
+                },
+            )
+        self.assertIn(disclaimer, Item.objects.get().theater_artwork["notices"])
+
+    def test_explicit_medium_and_granularity_override_form_claims(self):
+        """Production and broadcast types cannot become stage works via a form."""
+        for number, excluded_type in enumerate(
+            [
+                "Q7777570",
+                "Q43099500",
+                "Q35140",
+                "Q2635894",
+                "Q109349450",
+                "Q356055",
+                "Q7697093",
+            ],
+            start=2000,
+        ):
+            identifier = f"Q{number}"
+            self.entities[identifier] = {
+                "id": identifier,
+                "labels": {"en": {"value": "Nonstage Record"}},
+                "claims": {
+                    "P31": [
+                        {"mainsnak": {"datavalue": {"value": {"id": excluded_type}}}}
+                    ],
+                    "P7937": [{"mainsnak": {"datavalue": {"value": {"id": "Q2743"}}}}],
+                },
+            }
+            self.search_ids.append(identifier)
+        response = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+        )
+        self.assertContains(response, "Hamilton")
+        self.assertNotContains(response, "Nonstage Record")
+
+    def test_reviewed_specific_types_and_work_genres_supply_forms(self):
+        """Reviewed source classifications recognize forms without guessing."""
+        cases = [
+            ("Q3000", "Italian Opera Work", "Q785522", None, "Opera"),
+            ("Q3001", "Genre Musical Work", "Q58483083", "Q2743", "Musical"),
+            ("Q3002", "Ballet Feerie Work", "Q58483088", "Q123578591", "Ballet"),
+            ("Q3003", "Revue Work", "Q116476516", "Q918727", "Other"),
+        ]
+        for identifier, title, work_type, genre, _label in cases:
+            claims = {
+                "P31": [{"mainsnak": {"datavalue": {"value": {"id": work_type}}}}]
+            }
+            if genre:
+                claims["P136"] = [{"mainsnak": {"datavalue": {"value": {"id": genre}}}}]
+            self.entities[identifier] = {
+                "id": identifier,
+                "labels": {"en": {"value": title}},
+                "claims": claims,
+            }
+            self.search_ids.append(identifier)
+        response = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "Work"}
+        )
+        for _identifier, title, _work_type, _genre, label in cases:
+            self.assertContains(response, title)
+            self.assertContains(response, label)
+        self.client.post(
+            reverse("media_save"),
+            {
+                "media_id": "Q3003",
+                "source": "wikidata",
+                "media_type": "theater",
+                "status": "Planning",
+            },
+        )
+        self.assertEqual(Item.objects.get(media_id="Q3003").theater_forms, ["other"])
+
     def test_search_details_and_tracking_use_one_work_identity(self):
         """Ordinary title search excludes film and resolves redirects on save."""
         listed = self.client.get(
@@ -618,7 +837,7 @@ class TheaterDiscoveryTests(TestCase):
             self.assertContains(response, "Example Photographer")
         metadata = commons["query"]["pages"]["123"]["imageinfo"][0]["extmetadata"]
         for field, value in [
-            ("Restrictions", "personality rights"),
+            ("Restrictions", "unresolved third-party copyright"),
             ("LicenseUrl", "https://creativecommons.org/licenses/by-nc/4.0/"),
             ("Artist", ""),
         ]:
@@ -721,7 +940,7 @@ class TheaterDiscoveryTests(TestCase):
             self.assertNotContains(response, info["url"])
             self.assertContains(response, "The House of Bernarda Alba")
             depicted_work = "Q822850"
-            page["templates"].append({"title": "Template:Personality rights"})
+            page["templates"].append({"title": "Template:Copyright violation"})
             cache.clear()
             response = self.client.get(
                 reverse("search"), {"media_type": "theater", "q": "Bernarda"}

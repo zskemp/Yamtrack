@@ -17,9 +17,26 @@ FORM_IDS = {
     "Q2743": "musical",
     "Q1344": "opera",
     "Q15079786": "ballet",
+    "Q785522": "opera",
+    "Q918727": "other",
+    "Q13409536": "other",
 }
-WORK_IDS = [*FORM_IDS, "Q58483083", "Q58483088", "Q116476516"]
-EXCLUDED_TYPES = {"Q5", "Q11424", "Q5398426", "Q4167410", "Q4167836"}
+WORK_IDS = [*FORM_IDS, "Q58483083", "Q58483088", "Q116476516", "Q7725634"]
+GENRE_FORMS = {**FORM_IDS, "Q41425": "ballet", "Q123578591": "ballet"}
+EXCLUDED_TYPES = {
+    "Q5",
+    "Q11424",
+    "Q5398426",
+    "Q4167410",
+    "Q4167836",
+    "Q7777570",
+    "Q43099500",
+    "Q35140",
+    "Q2635894",
+    "Q109349450",
+    "Q356055",
+    "Q7697093",
+}
 CREATOR_ROLES = {
     "P50": "Authors",
     "P86": "Composers",
@@ -100,9 +117,16 @@ def forms(entity):
     if values(entity, "P272") and values(entity, "P161") and values(entity, "P57"):
         return []
     evidence = identifiers(entity, "P7937") + types
-    return list(
-        dict.fromkeys(FORM_IDS[value] for value in evidence if value in FORM_IDS)
-    )
+    classified = [FORM_IDS[value] for value in evidence if value in FORM_IDS]
+    stage_types = set(WORK_IDS) - {"Q7725634"}
+    if stage_types.intersection(types):
+        classified.extend(
+            GENRE_FORMS[value]
+            for value in identifiers(entity, "P136")
+            if value in GENRE_FORMS
+        )
+    named_forms = [form for form in classified if form != "other"]
+    return list(dict.fromkeys(named_forms or classified))
 
 
 def label(entity):
@@ -111,6 +135,21 @@ def label(entity):
     return labels.get("en", next(iter(labels.values()), {})).get(
         "value", entity.get("id", "")
     )
+
+
+def artwork_candidates(entity):
+    """Preserve preferred work images, then ordinary images and linked logos."""
+    claims = [
+        claim
+        for property_id in ("P18", "P154")
+        for claim in entity.get("claims", {}).get(property_id, [])
+        if claim.get("rank") != "deprecated"
+    ]
+    claims.sort(key=lambda claim: claim.get("rank") != "preferred")
+    values = [
+        claim.get("mainsnak", {}).get("datavalue", {}).get("value") for claim in claims
+    ]
+    return list(dict.fromkeys(value for value in values if isinstance(value, str)))
 
 
 def transform(entity, related):
@@ -142,7 +181,7 @@ def transform(entity, related):
         "title": label(entity),
         "image": settings.IMG_NONE,
         "theater_artwork": {},
-        "artwork_candidates": values(entity, "P18"),
+        "artwork_candidates": artwork_candidates(entity),
         "work_revision": entity.get("lastrevid"),
         "theater_forms": work_forms,
         "work_description": " / ".join([details["forms"], *dict.fromkeys(creators)]),
@@ -213,12 +252,15 @@ def theater(media_id):
 def search(query, page):
     """Filter a bounded candidate window before canonical result pagination."""
     literal = " ".join(query.split())[:200]
-    key = f"wikidata_search_v2_{literal}"
+    key = f"wikidata_search_v4_{literal}"
     cached = cache.get(key)
     if cached is None:
         escaped = literal.replace("\\", "\\\\").replace('"', '\\"')
-        filters = [f"P31={identifier}" for identifier in WORK_IDS]
+        filters = [
+            f"P31={identifier}" for identifier in WORK_IDS if identifier != "Q7725634"
+        ]
         filters.extend(f"P7937={identifier}" for identifier in FORM_IDS)
+        filters.extend(f"P136={identifier}" for identifier in GENRE_FORMS)
         params = {
             "action": "query",
             "list": "search",

@@ -24,6 +24,12 @@ Wikidata's public Action API supplies work metadata under CC0 without credential
 Search uses supported label/alias and statement filters, explicit Play, Musical,
 Opera and Ballet classification, and batched creator labels. Unknown forms are
 not guessed as Other. Manual creation remains available for unresolved works.
+Reviewed specific types include Italian opera, revue and pantomime. Named genre
+evidence is accepted only alongside recognized stage-work types. Direct production,
+performance, radio/audio drama and television-play classifications override form
+claims. Broad work types alone never imply a named form or Other. Ontology
+ancestry is not traversed blindly: some valid musical-work classes also have
+production ancestors in Wikidata.
 
 Search inspects at most 150 provider candidates, preserves provider order and
 deduplicates actual redirect targets before pagination. A visible notice identifies
@@ -35,9 +41,9 @@ Theater works do not generate release-calendar events.
 
 ## Artwork
 
-Commons images are eligible through a work's direct P18 image claim or verified
+Commons images are eligible through a work's direct P18 image/P154 logo claim or verified
 exact-work P180 depiction statements. Enrichment runs only for the displayed
-page, not every candidate. Each work examines up to three direct files and, if
+page, not every candidate. Each work examines up to five direct files and, if
 none qualify, three depiction candidates. Requests are serial and reuse the
 provider transport. Successful artwork selections are cached for one hour;
 Commons rate-limit responses impose a shared retry cooldown.
@@ -46,11 +52,23 @@ them with a placeholder. Explicit metadata sync invalidates the work's Commons
 selection and refuses to overwrite artwork when that lookup is unavailable.
 
 Accepted grants are CC0 1.0, CC BY 2.0/4.0 and CC BY-SA 3.0/4.0, with matching
-license-template evidence and meaningful artist attribution. Files with known
-permission, deletion, personality-rights, trademark or costume warnings are
-withheld. Other public-domain claims are not guessed safe.
-Unknown file templates, including unhandled disclaimer templates, require review
-and are withheld. Supplied notice links are retained as printable URLs.
+license-template evidence and supplied artist attribution. Explicit PD-textlogo
+and PD-old-auto/70/100-expired bases are supported when Commons also identifies
+the file as not copyrighted; the named basis and jurisdiction caveats are retained.
+No generic "Public domain" string is treated as sufficient evidence.
+
+The catalog-reuse policy favors coverage using published source assessments.
+Standard personality, trademark and costume notices accompany the image rather
+than automatically disqualifying it; they do not authorize endorsement, commercial
+promotion or isolated design reuse. Actual missing-permission, deletion, failed
+license-review and copyright-dispute warnings still exclude images. Unknown
+substantive restrictions are withheld; ordinary layout/language templates do not
+override an explicit grant. Migrated-license disclaimer references and supplied
+notice URLs are preserved through display and export.
+Expiry claims with missing-date warnings are rejected. Migrated-license files
+require the actual rendered file-specific disclaimer, not just a generic license
+template link. Older CC-only exports retain their original grant/author checks;
+new public-domain exports require complete, consistent basis and notice evidence.
 Exact depiction candidates also require affirmative performance/illustration descriptions;
 advertisements, audiences, adaptations and isolated set designs are excluded.
 
@@ -63,7 +81,7 @@ them without attribution. Offline restore requires a complete, consistent rights
 record; it cannot independently certify the truth of user-supplied export data.
 No image uploads, user-specific overrides or manual-title image matches are added.
 
-This is a conservative automated reuse policy, not a guarantee that contributed
+This is a source-assessed catalog reuse policy, not a guarantee that contributed
 metadata is correct or that every third-party right has been cleared.
 
 ## Verified Redirects
@@ -105,6 +123,11 @@ acceptance gates.
 Provider classification currently uses explicit supported forms rather than an
 unbounded ontology traversal. Some valid works with incomplete classifications
 will require manual entry. Production/granularity conflicts require further review.
+
+For ballet, ordinary versions and re-choreographies should share a work when the
+underlying relationship is verified; clearly authored reinventions remain distinct
+adaptations. Derivation alone does not prove equivalence. Current source data does
+not provide a reliable general mapping for these non-redirect grouping cases.
 
 ## Sources
 

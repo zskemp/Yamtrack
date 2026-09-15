@@ -1,3 +1,6 @@
+from unittest.mock import patch
+
+import requests
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.test import TestCase
@@ -14,6 +17,7 @@ from app.models import (
     Sources,
     Status,
 )
+from lists.models import CustomList
 
 
 class CreateEntryViewTests(TestCase):
@@ -155,6 +159,84 @@ class CreateEntryViewTests(TestCase):
             with self.subTest(view=name):
                 response = self.client.get(reverse(name, args=arguments))
                 self.assertEqual(response.status_code, 200)
+
+    @patch("app.providers.services.session.get")
+    def test_theater_organization_keeps_works_and_visits_distinct(self, provider_get):
+        """Library, lists, preferences and statistics retain their native semantics."""
+        provider_response = requests.Response()
+        provider_response.status_code = 200
+        provider_response._content = b'{"results":[]}'
+        provider_get.return_value = provider_response
+        for title, status in [("Alpha Stage", "Completed"), ("Beta Stage", "Planning")]:
+            self.client.post(
+                reverse("create_entry"),
+                {
+                    "title": title,
+                    "media_type": "theater",
+                    "theater_forms": ["play"],
+                    "status": status,
+                    "score": 8,
+                },
+            )
+        work = Item.objects.get(title="Alpha Stage")
+        self.client.post(
+            reverse("media_save"),
+            {
+                "media_id": work.media_id,
+                "source": "manual",
+                "media_type": "theater",
+                "status": "Completed",
+                "notes": "Return attendance",
+            },
+        )
+        listing = self.client.get(
+            reverse("medialist", args=["test", "theater"]),
+            {"layout": "table", "sort": "title", "status": "Completed"},
+        )
+        self.assertContains(listing, "Alpha Stage")
+        self.assertEqual(
+            [entry.item.title for entry in listing.context["media_list"]],
+            ["Alpha Stage"],
+        )
+        self.assertEqual(listing.context["media_list"].paginator.count, 1)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.theater_layout, "table")
+        self.assertEqual(self.user.theater_sort, "title")
+        self.assertEqual(self.user.theater_status, "Completed")
+        self.client.post(reverse("list_create"), {"name": "Stage Library"})
+        custom_list = CustomList.objects.get(name="Stage Library")
+        toggle = {"item_id": work.pk, "custom_list_id": custom_list.pk}
+        self.client.post(reverse("list_item_toggle"), toggle)
+        details = self.client.get(reverse("list_detail", args=[custom_list.pk]))
+        self.assertContains(details, "Alpha Stage")
+        self.assertEqual(details.context["items_count"], 1)
+        self.client.post(reverse("list_item_toggle"), toggle)
+        self.assertEqual(custom_list.items.count(), 0)
+        statistics = self.client.get(
+            reverse("statistics"), {"start-date": "all", "end-date": "all"}
+        )
+        self.assertEqual(statistics.context["media_count"]["theater"], 3)
+        self.assertContains(self.client.get(reverse("journal")), "Theater")
+        enabled = [
+            value for value in MediaTypes.values if value not in {"episode", "theater"}
+        ]
+        self.client.post(reverse("preferences"), {"media_types_checkboxes": enabled})
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.theater_enabled)
+        self.client.post(
+            reverse("preferences"), {"media_types_checkboxes": [*enabled, "theater"]}
+        )
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.theater_enabled)
+        stranger = get_user_model().objects.create_user(username="library-stranger")
+        self.client.force_login(stranger)
+        self.assertEqual(
+            self.client.get(reverse("medialist", args=["test", "theater"])).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.post(reverse("list_item_toggle"), toggle).status_code, 404
+        )
 
     def test_manual_theater_requires_valid_forms(self):
         """Missing and unknown classifications cannot create a theater work."""

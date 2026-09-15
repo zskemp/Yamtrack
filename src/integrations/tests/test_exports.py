@@ -118,6 +118,42 @@ class TheaterExportRestoreTest(TestCase):
         self.assertNotContains(response, "javascript:")
         self.assertNotContains(response, artwork["image"])
         self.assertEqual(Theater.objects.get().venue, "Local Theatre")
+        self._assert_invalid_legacy_credits_omit_images(content)
+
+    def _assert_invalid_legacy_credits_omit_images(self, content):
+        """Legacy records cannot bypass author or public-domain evidence checks."""
+        for legacy_change in ("missing_artist", "unverified_public_domain"):
+            with self.subTest(legacy_change=legacy_change):
+                rows = list(csv.DictReader(StringIO(content.decode())))
+                artwork = json.loads(rows[0]["theater_artwork"])
+                artwork["policy"] = 3
+                if legacy_change == "missing_artist":
+                    artwork["artist"] = ""
+                    artwork["rights"]["Artist"] = ""
+                else:
+                    artwork["license"] = "Public domain"
+                    artwork["license_url"] = (
+                        "https://commons.wikimedia.org/wiki/Template:pd-textlogo"
+                    )
+                rows[0]["theater_artwork"] = json.dumps(artwork)
+                invalid = StringIO()
+                writer = csv.DictWriter(invalid, fieldnames=rows[0].keys())
+                writer.writeheader()
+                writer.writerows(rows)
+                Item.objects.get(media_id="Q822850").delete()
+                self.client.post(
+                    reverse("import_yamtrack"),
+                    {
+                        "mode": "new",
+                        "yamtrack_csv": SimpleUploadedFile(
+                            "legacy.csv", invalid.getvalue().encode()
+                        ),
+                    },
+                )
+                self.assertEqual(
+                    Item.objects.get(media_id="Q822850").theater_artwork, {}
+                )
+                self.assertEqual(Theater.objects.get().venue, "Local Theatre")
 
     def test_manual_attendance_round_trip(self):
         """A fresh restore needs no external lookup or original catalog rows."""
