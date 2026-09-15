@@ -7,8 +7,8 @@ from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_GET, require_POST
 
-from app import helpers
-from app.models import Item, MediaManager, MediaTypes
+from app import helpers, theater
+from app.models import Item, MediaManager, MediaTypes, Sources
 from app.providers import services
 from lists.forms import CustomListForm
 from lists.models import CustomList, CustomListItem
@@ -258,6 +258,8 @@ def lists_modal(
     episode_number=None,
 ):
     """Return the modal showing all custom lists and allowing to add to them."""
+    if media_type == MediaTypes.THEATER.value and source == Sources.WIKIDATA.value:
+        media_id = theater.canonical_id(media_id)
     try:
         item = Item.objects.get(
             media_id=media_id,

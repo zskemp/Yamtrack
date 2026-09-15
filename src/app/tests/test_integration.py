@@ -13,6 +13,8 @@ from django.core.cache import cache
 from django.utils import timezone
 from playwright.sync_api import expect, sync_playwright
 
+from app.models import Item, Theater
+
 
 class IntegrationTest(StaticLiveServerTestCase):
     """Integration tests for the application."""
@@ -167,6 +169,70 @@ class IntegrationTest(StaticLiveServerTestCase):
             self.assertEqual(picture.bounding_box()["height"], frame["height"])
         finally:
             self.page.unroute(image_url)
+            self.page.set_viewport_size({"width": 1280, "height": 720})
+            cache.clear()
+
+    def test_theater_redirect_keeps_saved_attendance_visible(self):
+        """Duplicate provider IDs resolve to one card without losing a saved visit."""
+        fixture = json.loads(
+            (Path(__file__).parent / "mock_data/theater_artwork.json").read_text()
+        )
+        fixture["work"]["claims"].pop("P18")
+        old = Item.objects.create(
+            media_id="Q998",
+            source="wikidata",
+            media_type="theater",
+            title="Old work label",
+            image=settings.IMG_NONE,
+            theater_forms=["play"],
+        )
+        Theater.objects.create(item=old, user=self.user, notes="My saved visit")
+
+        def source_response(url, params, **_kwargs):
+            if "commons.wikimedia.org" in url:
+                payload = {"query": {"search": []}}
+            elif params["action"] == "query":
+                payload = {
+                    "query": {"search": [{"title": "Q998"}, {"title": "Q822850"}]}
+                }
+            else:
+                payload = {
+                    "entities": {
+                        "Q822850": fixture["work"],
+                        "Q998": {
+                            **fixture["work"],
+                            "redirects": {"from": "Q998", "to": "Q822850"},
+                        },
+                    }
+                }
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(payload).encode()
+            return response
+
+        cache.clear()
+        try:
+            with patch(
+                "app.providers.services.session.get", side_effect=source_response
+            ):
+                for width in (1280, 390):
+                    self.page.set_viewport_size({"width": width, "height": 900})
+                    self.page.goto(
+                        f"{self.live_server_url}/search?media_type=theater&q=Bernarda"
+                    )
+                    card = self.page.get_by_title(
+                        "The House of Bernarda Alba", exact=True
+                    )
+                    expect(card).to_have_count(1)
+                    card.click()
+                    expect(self.page.get_by_role("main")).to_contain_text(
+                        "My saved visit"
+                    )
+                    self.page.goto(f"{self.live_server_url}/test/theater")
+                    expect(
+                        self.page.get_by_title("Old work label", exact=True)
+                    ).to_have_count(1)
+        finally:
             self.page.set_viewport_size({"width": 1280, "height": 720})
             cache.clear()
 

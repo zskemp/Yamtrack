@@ -76,6 +76,41 @@ class TheaterForms(models.TextChoices):
     OTHER = "other", "Other"
 
 
+class TheaterRedirect(models.Model):
+    """Observed Wikidata redirects, independent of mutable catalog metadata."""
+
+    alias_id = models.CharField(max_length=36, unique=True)
+    canonical_id = models.CharField(max_length=36)
+    revision = models.PositiveBigIntegerField()
+    observed_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        """Display the provider identity edge in admin."""
+        return f"{self.alias_id} -> {self.canonical_id}"
+
+    @classmethod
+    def resolve(cls, media_id):
+        """Follow bounded observed edges without rewriting their provenance."""
+        visited = set()
+        for _step in range(32):
+            if media_id in visited:
+                break
+            visited.add(media_id)
+            target = (
+                cls.objects.filter(alias_id=media_id)
+                .values_list("canonical_id", flat=True)
+                .first()
+            )
+            if target is None:
+                return media_id
+            media_id = target
+        raise providers.services.ProviderAPIError(
+            Sources.WIKIDATA.value,
+            ValueError(),
+            "Conflicting Theater redirect chain",
+        )
+
+
 class Item(CalendarTriggerMixin, models.Model):
     """Model to store basic information about media items."""
 
@@ -763,6 +798,8 @@ class MediaManager(models.Manager):
         episode_number=None,
     ):
         """Get the common filter parameters for media queries."""
+        if media_type == MediaTypes.THEATER.value and source == Sources.WIKIDATA.value:
+            media_id = TheaterRedirect.resolve(media_id)
         params = {
             "item__media_type": media_type,
             "item__source": source,

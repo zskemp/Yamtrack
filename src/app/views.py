@@ -16,7 +16,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from app import config, helpers, history_processor
+from app import config, helpers, history_processor, theater
 from app import home as home_helpers
 from app import statistics as stats
 from app.forms import EpisodeForm, ManualItemForm, get_form_class
@@ -460,6 +460,11 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
             headers={"HX-Redirect": request.POST.get("next", "/")},
         )
 
+    media_id = (
+        theater.canonical_id(media_id)
+        if source == Sources.WIKIDATA.value and media_type == MediaTypes.THEATER.value
+        else media_id
+    )
     cache_key = f"{source}_{media_type}_{media_id}"
     if media_type == MediaTypes.SEASON.value:
         cache_key += f"_{season_number}"

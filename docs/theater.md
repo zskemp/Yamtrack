@@ -66,6 +66,28 @@ No image uploads, user-specific overrides or manual-title image matches are adde
 This is a conservative automated reuse policy, not a guarantee that contributed
 metadata is correct or that every third-party right has been cleared.
 
+## Verified Redirects
+
+Wikidata redirect responses with an explicit source/target pair and target revision
+are retained as read-only identity evidence. Resolving a saved alias reconciles it
+with the canonical work in a transaction. Each user's attendance ID, personal
+fields and history remain distinct. List memberships and notification exclusions
+move with the work; duplicate list membership retains its earlier addition date.
+Unexpected references or contradictory evidence abort the transaction.
+
+Original redirect edges remain recorded when a later redirect forms a chain.
+Old URLs, cached searches, list/history lookup and explicit sync resolve that
+chain consistently. Qualified artwork can move to an imageless canonical work,
+with its original evidence subject retained separately from its current work ID.
+Redirect transactions are serialized on PostgreSQL and SQLite; concurrent target
+creation during rename is retried as reconciliation rather than data deletion.
+
+Own-data imports resolve aliases already verified by this installation without
+provider access. Re-export uses canonical IDs. Uploaded files cannot assert new
+global equivalences: an old export imported into a fresh installation retains its
+unverified provider ID until that installation observes a redirect. Keep a full
+database backup when the locally observed redirect evidence itself must move.
+
 ## Release Limitations
 
 This is not the completed image-rich Theater feature. Representative live grids
@@ -75,9 +97,10 @@ and visual review remain necessary before release.
 
 Only actual Wikidata redirects establish canonical identity. Same-title works,
 adaptations and ambiguous ballet variants remain separate; derivative-work claims
-do not establish equivalence. Existing saved identities that subsequently redirect
-are not destructively merged. Verified non-redirect duplicate/grouping mappings,
-their provenance, and alias-aware offline portability remain open acceptance gates.
+do not establish equivalence. Saved identities are reconciled only for observed
+redirects, never by title, composer or image availability. Verified non-redirect
+duplicate/grouping mappings and fresh-install legacy-alias resolution remain open
+acceptance gates.
 
 Provider classification currently uses explicit supported forms rather than an
 unbounded ontology traversal. Some valid works with incomplete classifications

@@ -7,6 +7,7 @@ from django.conf import settings
 from django.core.cache import cache
 
 from app import helpers
+from app import theater as theater_identity
 from app.models import MediaTypes, Sources, TheaterForms
 from app.providers import commons, services
 
@@ -172,12 +173,14 @@ def illustrate(work):
     """Attach image and credit together after work selection and pagination."""
     work = work.copy()
     artwork = commons.artwork(
-        work["media_id"],
+        work.pop("artwork_work_id", work["media_id"]),
         work.pop("artwork_candidates", []),
         work.get("work_revision"),
         work["theater_forms"],
     )
     work["artwork_unavailable"] = artwork is None
+    if artwork and artwork["work_id"] != work["media_id"]:
+        artwork = theater_identity.retarget_artwork(artwork, work["media_id"])
     work.update(
         image=(artwork or {}).get("image", settings.IMG_NONE),
         theater_artwork=artwork or {},
@@ -190,6 +193,7 @@ def theater(media_id):
     """Resolve a work identity and reject unsupported or ambiguous records."""
     if not re.fullmatch(r"Q[1-9][0-9]*", media_id):
         services.raise_not_found_error(Sources.WIKIDATA.value, media_id, "theater")
+    media_id = theater_identity.canonical_id(media_id)
     key = f"wikidata_theater_{media_id}"
     cached = cache.get(key)
     if cached is not None and cached.get("artwork_policy") == commons.POLICY_VERSION:
@@ -199,6 +203,7 @@ def theater(media_id):
         services.raise_not_found_error(
             Sources.WIKIDATA.value, media_id, "theater work with a supported form"
         )
+    theater_identity.record_redirect(media_id, entity)
     result = illustrate(hydrate([entity])[0])
     if not result.get("artwork_unavailable"):
         cache.set(f"wikidata_theater_{result['media_id']}", result, 3600)
@@ -231,6 +236,7 @@ def search(query, page):
             for hit in hits:
                 entity = work_entities.get(hit["title"], {})
                 if forms(entity):
+                    theater_identity.record_redirect(hit["title"], entity)
                     selected.setdefault(entity["id"], entity)
             continuation = data.get("continue", {})
             if not continuation:
@@ -239,7 +245,21 @@ def search(query, page):
         cached = {"results": results, "limited": bool(continuation)}
         cache.set(key, cached, 900)
     page = max(1, page)
-    results = cached["results"]
+    canonical_results = {}
+    for work in cached["results"]:
+        canonical_id = theater_identity.canonical_id(work["media_id"])
+        if canonical_id != work["media_id"]:
+            canonical_results.setdefault(
+                canonical_id,
+                {
+                    **work,
+                    "media_id": canonical_id,
+                    "artwork_work_id": work["media_id"],
+                },
+            )
+        else:
+            canonical_results[canonical_id] = work
+    results = list(canonical_results.values())
     response = helpers.format_search_response(
         page,
         PAGE_SIZE,

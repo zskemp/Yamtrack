@@ -7,6 +7,7 @@ from django.contrib.admin.sites import AlreadyRegistered
 from app.models import (
     Episode,
     Item,
+    TheaterRedirect,
     UserMessage,
 )
 
@@ -43,6 +44,26 @@ class UserMessageAdmin(admin.ModelAdmin):
     search_fields = ["user__username", "message"]
     list_display = ["message", "level", "user", "created_at", "shown_at"]
     list_filter = ["level", "shown_at"]
+
+
+@admin.register(TheaterRedirect)
+class TheaterRedirectAdmin(admin.ModelAdmin):
+    """Inspect provider evidence without manually asserting new equivalences."""
+
+    list_display = ["alias_id", "canonical_id", "revision", "observed_at"]
+    readonly_fields = list_display
+
+    def has_add_permission(self, request):  # noqa: ARG002
+        """Only provider responses may establish redirects."""
+        return False
+
+    def has_change_permission(self, request, obj=None):  # noqa: ARG002
+        """Keep observed identity evidence immutable through admin."""
+        return False
+
+    def has_delete_permission(self, request, obj=None):  # noqa: ARG002
+        """Do not invalidate saved identity through admin deletion."""
+        return False
 
 
 class MediaAdmin(admin.ModelAdmin):

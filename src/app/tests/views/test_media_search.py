@@ -1,19 +1,28 @@
+import csv
 import json
+from concurrent.futures import ThreadPoolExecutor
+from io import StringIO
 from pathlib import Path
+from threading import Barrier, local
 from unittest.mock import patch
 
 import requests
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.test import TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import connections
+from django.test import Client, TestCase, TransactionTestCase, skipUnlessDBFeature
 from django.urls import reverse
 
 from app.models import (
     Item,
     MediaTypes,
+    Movie,
     Sources,
     Theater,
+    TheaterRedirect,
 )
+from lists.models import CustomList
 
 
 class MediaSearchViewTests(TestCase):
@@ -59,6 +68,79 @@ class MediaSearchViewTests(TestCase):
             1,
             Sources.TMDB.value,
         )
+
+
+class TheaterRedirectConcurrencyTests(TransactionTestCase):
+    """Exercise concurrent HTTP observations against a locking database backend."""
+
+    @skipUnlessDBFeature("has_select_for_update")
+    def test_competing_redirects_preserve_one_consistent_identity(self):
+        """Concurrent conflicting responses cannot split evidence from attendance."""
+        user = get_user_model().objects.create_user(username="concurrent-attendee")
+        old = Item.objects.create(
+            media_id="Q998",
+            source="wikidata",
+            media_type="theater",
+            title="Saved work",
+            image="",
+            theater_forms=["play"],
+        )
+        attendance = Theater.objects.create(item=old, user=user, notes="Keep my visit")
+        barrier = Barrier(2)
+        thread_state = local()
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )
+        fixture["work"]["claims"].pop("P18")
+
+        def source_response(url, **_kwargs):
+            if "commons.wikimedia.org" in url:
+                payload = {"query": {"search": []}}
+            else:
+                barrier.wait(timeout=15)
+                payload = {
+                    "entities": {
+                        "Q998": {
+                            **fixture["work"],
+                            "id": thread_state.target,
+                            "redirects": {"from": "Q998", "to": thread_state.target},
+                        }
+                    }
+                }
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(payload).encode()
+            return response
+
+        def request_target(target):
+            try:
+                thread_state.target = target
+                client = Client()
+                client.force_login(user)
+                return client.get(
+                    reverse(
+                        "media_details",
+                        args=["wikidata", "theater", "Q998", "saved-work"],
+                    )
+                ).status_code
+            finally:
+                connections.close_all()
+
+        cache.clear()
+        self.addCleanup(cache.clear)
+        with (
+            patch("app.providers.services.session.get", side_effect=source_response),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            responses = list(executor.map(request_target, ["Q822850", "Q19320959"]))
+        self.assertEqual(sorted(responses), [200, 500])
+        attendance.refresh_from_db()
+        self.assertEqual(
+            attendance.item.media_id,
+            TheaterRedirect.objects.get(alias_id="Q998").canonical_id,
+        )
+        self.assertEqual(attendance.notes, "Keep my visit")
+        self.assertEqual(Item.objects.filter(media_type="theater").count(), 1)
 
 
 class TheaterDiscoveryTests(TestCase):
@@ -175,6 +257,258 @@ class TheaterDiscoveryTests(TestCase):
         self.assertEqual(
             Item.objects.get(media_type="theater").theater_forms, ["musical"]
         )
+
+    def test_saved_redirect_preserves_attendance_history_and_memberships(self):
+        """Verified redirects reconcile saved works without merging attendances."""
+        old = Item.objects.create(
+            media_id="Q998",
+            source="wikidata",
+            media_type="theater",
+            title="Old Hamilton",
+            image="",
+            theater_forms=["musical"],
+        )
+        target = Item.objects.create(
+            media_id="Q19320959",
+            source="wikidata",
+            media_type="theater",
+            title="Hamilton",
+            image="",
+            theater_forms=["musical"],
+        )
+        first = Theater.objects.create(
+            item=old, user=self.user, notes="First visit", venue="First Theatre"
+        )
+        second = Theater.objects.create(
+            item=target, user=self.user, notes="Second visit"
+        )
+        other = get_user_model().objects.create_user(username="other-attendee")
+        private = Theater.objects.create(item=old, user=other, notes="Private visit")
+        history_ids = list(first.history.values_list("history_id", flat=True))
+        custom_list = CustomList.objects.create(name="Stage works", owner=self.user)
+        custom_list.items.add(old, target)
+        other.notification_excluded_items.add(old)
+        old_export = b"".join(self.client.get(reverse("export_csv")).streaming_content)
+
+        response = self.client.get(
+            reverse("media_details", args=["wikidata", "theater", "Q998", "hamilton"])
+        )
+        self.assertContains(response, "First visit")
+        self.assertContains(response, "Second visit")
+        self.assertNotContains(response, "Private visit")
+        for attendance in (first, second, private):
+            attendance.refresh_from_db()
+            self.assertEqual(attendance.item_id, target.pk)
+        self.assertEqual(
+            list(first.history.values_list("history_id", flat=True)), history_ids
+        )
+        self.assertEqual(
+            list(custom_list.items.values_list("pk", flat=True)), [target.pk]
+        )
+        self.assertEqual(
+            list(other.notification_excluded_items.values_list("pk", flat=True)),
+            [target.pk],
+        )
+        self.assertEqual(Item.objects.filter(media_type="theater").count(), 1)
+        reader = get_user_model().objects.create_user(username="restore-attendee")
+        self.client.force_login(reader)
+        with patch("app.providers.services.session.get", side_effect=requests.Timeout):
+            self.client.post(
+                reverse("import_yamtrack"),
+                {
+                    "mode": "new",
+                    "yamtrack_csv": SimpleUploadedFile("old.csv", old_export),
+                },
+            )
+            listing = self.client.get(
+                reverse("medialist", args=[reader.username, "theater"])
+            )
+            self.assertEqual(listing.status_code, 200)
+            modal = self.client.get(
+                reverse("lists_modal", args=["wikidata", "theater", "Q998"])
+            )
+            self.assertEqual(modal.status_code, 200)
+        self.assertEqual(
+            set(Theater.objects.filter(user=reader).values_list("item_id", flat=True)),
+            {target.pk},
+        )
+        self.assertEqual(Theater.objects.filter(user=reader).count(), 2)
+        new_export = b"".join(self.client.get(reverse("export_csv")).streaming_content)
+        self.assertEqual(
+            {row["media_id"] for row in csv.DictReader(StringIO(new_export.decode()))},
+            {"Q19320959"},
+        )
+
+    def test_redirect_preserves_artwork_and_original_evidence_during_outage(self):
+        """Inherit saved credits without rewriting their evidence subject."""
+        old = Item.objects.create(
+            media_id="Q998",
+            source="wikidata",
+            media_type="theater",
+            title="Hamilton",
+            image="https://thumb.wikimedia.org/stage.jpg",
+            theater_forms=["musical"],
+            theater_artwork={
+                "work_id": "Q998",
+                "work_revision": 100,
+                "evidence": "P18",
+                "artist": "Saved Photographer",
+            },
+        )
+        target = Item.objects.create(
+            media_id="Q19320959",
+            source="wikidata",
+            media_type="theater",
+            title="Hamilton",
+            image="",
+            theater_forms=["musical"],
+        )
+        Theater.objects.create(item=old, user=self.user, notes="My visit")
+
+        def source_response(url, params, **kwargs):
+            if "commons.wikimedia.org" in url:
+                raise requests.Timeout
+            return self.source_response(url, params, **kwargs)
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse(
+                    "media_details", args=["wikidata", "theater", "Q998", "hamilton"]
+                )
+            )
+        self.assertContains(response, "Saved Photographer")
+        target.refresh_from_db()
+        self.assertEqual(target.image, "https://thumb.wikimedia.org/stage.jpg")
+        self.assertEqual(target.theater_artwork["work_id"], "Q19320959")
+        self.assertEqual(target.theater_artwork["evidence_work_id"], "Q998")
+        self.assertEqual(target.theater_artwork["work_revision"], 100)
+
+    def test_cached_search_resolves_newly_verified_aliases(self):
+        """Cached duplicate results converge once another lookup verifies identity."""
+        self.entities["Q998"] = {**self.entities["Q19320959"], "id": "Q998"}
+        first = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+        )
+        self.assertEqual(len(first.context["data"]["results"]), 2)
+        self.entities["Q998"] = {
+            **self.entities["Q19320959"],
+            "redirects": {"from": "Q998", "to": "Q19320959"},
+        }
+        self.client.get(
+            reverse("media_details", args=["wikidata", "theater", "Q998", "hamilton"])
+        )
+        second = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+        )
+        self.assertEqual(
+            [entry["item"]["media_id"] for entry in second.context["data"]["results"]],
+            ["Q19320959"],
+        )
+
+    def test_unexpected_reference_aborts_redirect_without_data_loss(self):
+        """Unexpected catalog references cannot be silently cascade-deleted."""
+        old = Item.objects.create(
+            media_id="Q998",
+            source="wikidata",
+            media_type="theater",
+            title="Old Hamilton",
+            image="",
+            theater_forms=["musical"],
+        )
+        Item.objects.create(
+            media_id="Q19320959",
+            source="wikidata",
+            media_type="theater",
+            title="Hamilton",
+            image="",
+            theater_forms=["musical"],
+        )
+        attendance = Theater.objects.create(
+            item=old, user=self.user, notes="Keep my history"
+        )
+        unexpected = Movie.objects.create(item=old, user=self.user, status="Planning")
+        response = self.client.get(
+            reverse("media_details", args=["wikidata", "theater", "Q998", "hamilton"])
+        )
+        self.assertContains(response, "saved records were not changed", status_code=500)
+        attendance.refresh_from_db()
+        self.assertEqual(attendance.item_id, old.pk)
+        self.assertTrue(Movie.objects.filter(pk=unexpected.pk).exists())
+        self.assertFalse(TheaterRedirect.objects.filter(alias_id="Q998").exists())
+
+    def test_redirect_chain_retains_original_evidence_and_one_work(self):
+        """Later redirects resolve old URLs without rewriting their evidence."""
+        self.client.post(
+            reverse("media_save"),
+            {
+                "media_id": "Q998",
+                "media_type": "theater",
+                "source": "wikidata",
+                "status": "Completed",
+                "notes": "Original visit",
+            },
+        )
+        self.entities["Q997"] = {**self.entities["Q19320959"], "id": "Q997"}
+        self.entities["Q19320959"] = {
+            **self.entities["Q997"],
+            "redirects": {"from": "Q19320959", "to": "Q997"},
+        }
+        self.search_ids = ["Q19320959", "Q997"]
+        cache.clear()
+        response = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+        )
+        self.assertEqual(len(response.context["data"]["results"]), 1)
+        self.assertEqual(Theater.objects.get().item.media_id, "Q997")
+        response = self.client.get(
+            reverse("media_details", args=["wikidata", "theater", "Q998", "hamilton"])
+        )
+        self.assertContains(response, "Original visit")
+        self.assertEqual(
+            TheaterRedirect.objects.get(alias_id="Q998").canonical_id, "Q19320959"
+        )
+        self.entities["Q998"] = {
+            **self.entities["Q997"],
+            "redirects": {"from": "Q998", "to": "Q997"},
+        }
+        self.search_ids = ["Q998", "Q19320959", "Q997"]
+        cache.clear()
+        response = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context["data"]["results"]), 1)
+        self.assertEqual(
+            TheaterRedirect.objects.get(alias_id="Q998").canonical_id, "Q19320959"
+        )
+
+    def test_conflicting_saved_redirect_leaves_records_untouched(self):
+        """Contradictory provider identity cannot silently reassign saved work."""
+        self.client.get(
+            reverse("media_details", args=["wikidata", "theater", "Q998", "hamilton"])
+        )
+        self.client.post(
+            reverse("media_save"),
+            {
+                "media_id": "Q19320959",
+                "media_type": "theater",
+                "source": "wikidata",
+                "status": "Completed",
+                "notes": "Keep this visit",
+            },
+        )
+        self.entities["Q998"] = {
+            **self.entities["Q19320959"],
+            "id": "Q997",
+            "redirects": {"from": "Q998", "to": "Q997"},
+        }
+        cache.clear()
+        response = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+        )
+        self.assertContains(response, "Conflicting Theater identity", status_code=500)
+        self.assertEqual(Theater.objects.get().item.media_id, "Q19320959")
+        self.assertEqual(Theater.objects.get().notes, "Keep this visit")
 
     def test_work_linked_artwork_keeps_credit_through_tracking(self):
         """An eligible Commons image carries its source and license to the library."""
@@ -518,7 +852,7 @@ class TheaterDiscoveryTests(TestCase):
         self.client.post(
             reverse("media_save"),
             {
-                "media_id": "Q19320959",
+                "media_id": "Q998",
                 "media_type": "theater",
                 "source": "wikidata",
                 "status": "Planning",
@@ -527,7 +861,7 @@ class TheaterDiscoveryTests(TestCase):
         )
         self.entities["Q19320959"]["labels"] = {"en": {"value": "Hamilton Updated"}}
         response = self.client.post(
-            reverse("sync_metadata", args=["wikidata", "theater", "Q19320959"]),
+            reverse("sync_metadata", args=["wikidata", "theater", "Q998"]),
             {"next": "/"},
         )
         self.assertEqual(response.status_code, 302)

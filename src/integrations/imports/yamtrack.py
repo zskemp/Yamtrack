@@ -11,7 +11,7 @@ from django.core.exceptions import ValidationError
 from django.utils.dateparse import parse_datetime
 
 import app
-from app import config
+from app import config, theater
 from app.models import MediaTypes, Sources
 from app.providers import commons, services
 from app.templatetags import app_tags
@@ -201,6 +201,10 @@ class YamtrackImporter:
         if not row.get("image"):
             row["image"] = settings.IMG_NONE
         artwork = self._theater_artwork(row)
+        if row["source"] == Sources.WIKIDATA.value:
+            row["media_id"] = theater.canonical_id(row["media_id"])
+            if artwork:
+                artwork = theater.retarget_artwork(artwork, row["media_id"])
         return {"theater_forms": work_forms, "theater_artwork": artwork}
 
     def _theater_artwork(self, row):
