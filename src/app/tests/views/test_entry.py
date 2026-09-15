@@ -64,6 +64,113 @@ class CreateEntryViewTests(TestCase):
         self.assertEqual(movie.progress, 1)
         self.assertEqual(movie.user, self.user)
 
+    def test_create_manual_theater_with_multiple_forms(self):
+        """An imageless hybrid stage work can be saved and tracked."""
+        response = self.client.post(
+            reverse("create_entry"),
+            {
+                "title": "Local Stage Work",
+                "media_type": "theater",
+                "theater_forms": ["play", "musical"],
+                "status": Status.COMPLETED.value,
+                "score": 8,
+                "notes": "Opening night",
+            },
+            follow=True,
+        )
+
+        self.assertContains(response, "Local Stage Work added successfully.")
+        item = Item.objects.get(title="Local Stage Work")
+        self.assertEqual(item.theater_forms, ["play", "musical"])
+        self.assertEqual(item.theater_set.get(user=self.user).notes, "Opening night")
+        library = self.client.get(reverse("medialist", args=["test", "theater"]))
+        self.assertContains(library, "Local Stage Work")
+        details = self.client.get(
+            reverse(
+                "media_details",
+                args=["manual", "theater", item.media_id, "local-stage-work"],
+            ),
+        )
+        self.assertContains(details, "Play, Musical")
+
+    def test_repeat_theater_attendance_preserves_personal_details(self):
+        """Repeat visits retain independent details and enforce ownership."""
+        self.client.post(
+            reverse("create_entry"),
+            {
+                "title": "Repeated Work",
+                "media_type": "theater",
+                "theater_forms": ["ballet"],
+                "status": Status.COMPLETED.value,
+                "end_date": "2026-09-01",
+                "venue": "First Theatre",
+                "location": "London",
+                "production": "First Company",
+                "notes": "First visit",
+            },
+        )
+        item = Item.objects.get(title="Repeated Work")
+        first = item.theater_set.get(user=self.user)
+        payload = {
+            "media_id": item.media_id,
+            "source": "manual",
+            "media_type": "theater",
+            "status": Status.COMPLETED.value,
+            "venue": "Second Theatre",
+            "production": "Second Company",
+            "notes": "Second visit",
+            "score": 9,
+        }
+        self.client.post(reverse("media_save"), payload)
+        self.assertEqual(item.theater_set.count(), 2)
+        first.refresh_from_db()
+        self.assertEqual(first.venue, "First Theatre")
+        self.assertEqual(first.end_date.date().isoformat(), "2026-09-01")
+        second = item.theater_set.exclude(pk=first.pk).get()
+        self.assertEqual(second.venue, "Second Theatre")
+        self.assertIsNone(second.end_date)
+        payload.update(instance_id=second.pk, venue="", production="Updated Company")
+        self.client.post(reverse("media_save"), payload)
+        second.refresh_from_db()
+        self.assertEqual(second.venue, "")
+        self.assertEqual(second.history.first().production, "Updated Company")
+        stranger = get_user_model().objects.create_user(username="stranger")
+        self.client.force_login(stranger)
+        self.assertEqual(
+            self.client.post(reverse("media_save"), payload).status_code, 404
+        )
+        self.assertEqual(
+            self.client.post(reverse("media_delete"), payload).status_code,
+            404,
+        )
+        self.client.force_login(self.user)
+        self.client.post(reverse("media_delete"), payload)
+        self.assertEqual(item.theater_set.count(), 1)
+        self.assertTrue(Item.objects.filter(pk=item.pk).exists())
+        for name, arguments in [
+            ("medialist", ["test", "theater"]),
+            ("statistics", []),
+            ("journal", []),
+        ]:
+            with self.subTest(view=name):
+                response = self.client.get(reverse(name, args=arguments))
+                self.assertEqual(response.status_code, 200)
+
+    def test_manual_theater_requires_valid_forms(self):
+        """Missing and unknown classifications cannot create a theater work."""
+        for classifications in ([], ["film"]):
+            with self.subTest(classifications=classifications):
+                self.client.post(
+                    reverse("create_entry"),
+                    {
+                        "title": "Invalid Work",
+                        "media_type": "theater",
+                        "theater_forms": classifications,
+                        "status": Status.PLANNING.value,
+                    },
+                )
+                self.assertFalse(Item.objects.filter(title="Invalid Work").exists())
+
     def test_create_entry_post_tv(self):
         """Test creating a TV show entry."""
         form_data = {

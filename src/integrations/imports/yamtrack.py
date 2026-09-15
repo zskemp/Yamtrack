@@ -1,9 +1,13 @@
+import json
 import logging
 from collections import defaultdict
 from csv import DictReader
+from io import StringIO
 
+from django import forms
 from django.apps import apps
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.utils.dateparse import parse_datetime
 
 import app
@@ -57,7 +61,7 @@ class YamtrackImporter:
     def import_data(self):
         """Import all user data from the CSV file."""
         try:
-            decoded_file = self.file.read().decode("utf-8").splitlines()
+            decoded_file = StringIO(self.file.read().decode("utf-8"))
         except UnicodeDecodeError as e:
             msg = "Invalid file format. Please upload a CSV file."
             raise MediaImportError(msg) from e
@@ -92,6 +96,10 @@ class YamtrackImporter:
     def _process_row(self, row):
         """Process a single row from the CSV file."""
         media_type = row["media_type"]
+
+        theater_defaults = self._theater_defaults(row)
+        if theater_defaults is None:
+            return
 
         season_number = (
             int(row["season_number"]) if row["season_number"] != "" else None
@@ -128,7 +136,12 @@ class YamtrackImporter:
                 episode_number,
             )
 
-        item, _ = app.models.Item.objects.update_or_create(
+        item_writer = (
+            app.models.Item.objects.get_or_create
+            if media_type == MediaTypes.THEATER.value
+            else app.models.Item.objects.update_or_create
+        )
+        item, _ = item_writer(
             media_id=row["media_id"],
             source=row["source"],
             media_type=media_type,
@@ -137,6 +150,7 @@ class YamtrackImporter:
             defaults={
                 "title": row["title"],
                 "image": row["image"],
+                **theater_defaults,
             },
         )
 
@@ -163,6 +177,30 @@ class YamtrackImporter:
             error_msg = f"{row['title']} ({media_type}): {form.errors.as_json()}"
             self.warnings.append(error_msg)
             logger.error(error_msg)
+
+    def _theater_defaults(self, row):
+        """Validate Theater before overwrite bookkeeping or shared item changes."""
+        if row["media_type"] != MediaTypes.THEATER.value:
+            return {}
+        if not row.get("title", "").strip():
+            self.warnings.append("Theater import requires a work title.")
+            return None
+        try:
+            work_forms = forms.MultipleChoiceField(
+                choices=app.models.TheaterForms.choices,
+            ).clean(json.loads(row.get("theater_forms") or "[]"))
+        except (ValueError, TypeError, ValidationError):
+            self.warnings.append(f"{row['title']} (theater): Invalid theater forms.")
+            return None
+        attendance = app.forms.TheaterForm(row)
+        if not attendance.is_valid():
+            self.warnings.append(
+                f"{row['title']} (theater): {attendance.errors.as_json()}",
+            )
+            return None
+        if not row.get("image"):
+            row["image"] = settings.IMG_NONE
+        return {"theater_forms": work_forms}
 
     def _handle_missing_metadata(self, row, media_type, season_number, episode_number):
         """Handle missing metadata by fetching from provider."""

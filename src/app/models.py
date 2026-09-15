@@ -46,6 +46,7 @@ class Sources(models.TextChoices):
     HARDCOVER = "hardcover", "Hardcover"
     COMICVINE = "comicvine", "Comic Vine"
     BGG = "bgg", "BoardGameGeek"
+    WIKIDATA = "wikidata", "Wikidata"
     MANUAL = "manual", "Manual"
 
 
@@ -62,6 +63,17 @@ class MediaTypes(models.TextChoices):
     BOOK = "book", "Book"
     COMIC = "comic", "Comic"
     BOARDGAME = "boardgame", "Boardgame"
+    THEATER = "theater", "Theater"
+
+
+class TheaterForms(models.TextChoices):
+    """Classifications of a stage work."""
+
+    PLAY = "play", "Play"
+    MUSICAL = "musical", "Musical"
+    OPERA = "opera", "Opera"
+    BALLET = "ballet", "Ballet"
+    OTHER = "other", "Other"
 
 
 class Item(CalendarTriggerMixin, models.Model):
@@ -82,6 +94,7 @@ class Item(CalendarTriggerMixin, models.Model):
     image = models.URLField()  # if add default, custom media entry will show the value
     season_number = models.PositiveIntegerField(null=True, blank=True)
     episode_number = models.PositiveIntegerField(null=True, blank=True)
+    theater_forms = models.JSONField(default=list, blank=True)
 
     class Meta:
         """Meta options for the model."""
@@ -1890,6 +1903,24 @@ class Movie(Media):
     """Model for movies."""
 
     tracker = FieldTracker()
+
+
+class Theater(Media):
+    """Personal tracking of a theater work."""
+
+    venue = models.CharField(max_length=255, blank=True, default="")
+    location = models.CharField(max_length=255, blank=True, default="")
+    production = models.CharField(max_length=500, blank=True, default="")
+    tracker = FieldTracker()
+
+    def process_status(self):
+        """Record attendance completion without external metadata."""
+        if self.status == Status.COMPLETED.value:
+            self.progress = 1
+
+    def process_progress(self):
+        """Attendance has no incremental progress or inferred date seen."""
+        self.progress = 1 if self.status == Status.COMPLETED.value else 0
 
 
 class Game(Media):

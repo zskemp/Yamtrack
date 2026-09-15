@@ -35,7 +35,7 @@
       {% endif %}
     {% endwith %}
 
-    {% if media.progress and media_type != MediaTypes.MOVIE.value %}
+    {% if media.progress and item.media_type != MediaTypes.MOVIE.value and item.media_type != MediaTypes.THEATER.value %}
       <div class="absolute bottom-2 left-2 bg-gray-900/90 text-white text-xs px-2 py-1 rounded-md flex items-center shadow-md">
         <span class="text-sm text-white">
           {{ media.formatted_progress }}

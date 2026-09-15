@@ -142,6 +142,23 @@ class User(AbstractUser):
         help_text="Hide unreleased media from the home page",
     )
 
+    theater_enabled = models.BooleanField(default=True)
+    theater_layout = models.CharField(
+        max_length=20,
+        default=LayoutChoices.GRID,
+        choices=LayoutChoices,
+    )
+    theater_sort = models.CharField(
+        max_length=20,
+        default=MediaSortChoices.SCORE,
+        choices=MediaSortChoices,
+    )
+    theater_status = models.CharField(
+        max_length=20,
+        default=MediaStatusChoices.ALL,
+        choices=MediaStatusChoices,
+    )
+
     # Media type preferences: TV Shows
     tv_enabled = models.BooleanField(default=True)
     tv_layout = models.CharField(

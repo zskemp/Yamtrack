@@ -1,4 +1,5 @@
 import csv
+import json
 import logging
 
 from django.apps import apps
@@ -69,6 +70,9 @@ def generate_rows(user):
             row = [getattr(media.item, field, "") for field in fields["item"]] + [
                 getattr(media, field, "") for field in fields["track"]
             ]
+            row[fields["item"].index("theater_forms")] = json.dumps(
+                media.item.theater_forms,
+            )
 
             if media_type == MediaTypes.GAME.value:
                 # calculate index of progress field

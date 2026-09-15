@@ -70,6 +70,16 @@ COLORS = {
 
 # --- Central Configuration Dictionary ---
 MEDIA_TYPE_CONFIG = {
+    MediaTypes.THEATER.value: {
+        "sources": [Sources.WIKIDATA],
+        "default_source": Sources.WIKIDATA,
+        "sample_query": "Hamilton",
+        "unicode_icon": "🎭",
+        "verb": ("attend", "attended"),
+        "text_color": COLORS["red"]["text"],
+        "stats_color": COLORS["red"]["hex"],
+        "svg_icon": '<path d="M2 3h20v18H2zM8 3v18M16 3v18"/>',
+    },
     MediaTypes.TV.value: {
         "sources": [Sources.TMDB],
         "default_source": Sources.TMDB,

@@ -20,6 +20,7 @@ from app.providers import (
     manual,
     openlibrary,
     tmdb,
+    wikidata,
 )
 
 logger = logging.getLogger(__name__)
@@ -185,6 +186,8 @@ def api_request(
 
         # handle rate limiting
         if status_code == requests.codes.too_many_requests:
+            if provider == Sources.WIKIDATA.value:
+                raise
             seconds_to_wait = int(error_resp.headers.get("Retry-After", 5))
             logger.warning("Rate limited, waiting %s seconds", seconds_to_wait)
             time.sleep(seconds_to_wait + 3)
@@ -245,6 +248,7 @@ def get_media_metadata(
         ),
         MediaTypes.COMIC.value: lambda: comicvine.comic(media_id),
         MediaTypes.BOARDGAME.value: lambda: bgg.boardgame(media_id),
+        MediaTypes.THEATER.value: lambda: wikidata.theater(media_id),
     }
     return metadata_retrievers[media_type]()
 
@@ -270,5 +274,6 @@ def search(media_type, query, page, source=None):
         ),
         MediaTypes.COMIC.value: lambda: comicvine.search(query, page),
         MediaTypes.BOARDGAME.value: lambda: bgg.search(query, page),
+        MediaTypes.THEATER.value: lambda: wikidata.search(query, page),
     }
     return search_handlers[media_type]()

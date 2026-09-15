@@ -40,6 +40,39 @@ class IntegrationTest(StaticLiveServerTestCase):
         cls.browser.close()
         cls.playwright.stop()
 
+    def test_manual_theater_desktop_and_mobile(self):
+        """Create and inspect an imageless hybrid work at both viewport sizes."""
+        for width in (1280, 390):
+            with self.subTest(width=width):
+                self.page.set_viewport_size({"width": width, "height": 900})
+                self.page.goto(f"{self.live_server_url}/create")
+                self.page.get_by_role("button", name="Theater", exact=True).click()
+                self.page.get_by_placeholder("Enter title").fill(f"Local Work {width}")
+                self.page.get_by_label("Play", exact=True).check()
+                self.page.get_by_label("Musical", exact=True).check()
+                self.page.get_by_label("Venue", exact=True).fill("First Theatre")
+                self.page.get_by_label("Date Seen", exact=True).fill("2026-09-01")
+                self.page.get_by_role("button", name="Create Entry").click()
+                expect(self.page.locator("body")).to_contain_text(
+                    f"Local Work {width} added successfully.",
+                )
+                self.page.goto(f"{self.live_server_url}/test/theater")
+                self.page.get_by_title(f"Local Work {width}", exact=True).click()
+                expect(self.page.get_by_role("main")).to_contain_text("Play, Musical")
+                expect(self.page.get_by_role("main")).to_contain_text("First Theatre")
+                self.page.get_by_title("More tracking options").click()
+                self.page.get_by_role("button", name="Add new entry").click()
+                self.page.get_by_label("Venue", exact=True).fill("Second Theatre")
+                self.page.get_by_role("button", name="Add", exact=True).click()
+                expect(self.page.get_by_role("main")).to_contain_text("Second Theatre")
+                expect(self.page.get_by_role("main")).to_contain_text("First Theatre")
+                self.assertTrue(
+                    self.page.evaluate(
+                        "document.documentElement.scrollWidth <= window.innerWidth",
+                    ),
+                )
+        self.page.set_viewport_size({"width": 1280, "height": 720})
+
     def test_season_progress_edit(self):
         """Test the progress edit of a season."""
         self.page.get_by_placeholder("Search tv shows...").fill("breaking bad")

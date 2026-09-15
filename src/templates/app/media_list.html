@@ -166,7 +166,7 @@
               <th class="p-2 w-15"></th>
               <th class="p-2 pe-8 w-2/5">Title</th>
               <th class="p-2 text-center">Score</th>
-              {% if media_type != MediaTypes.MOVIE.value %}<th class="p-2 text-center">Progress</th>{% endif %}
+              {% if media_type != MediaTypes.MOVIE.value and media_type != MediaTypes.THEATER.value %}<th class="p-2 text-center">Progress</th>{% endif %}
               {% if media_type == MediaTypes.TV.value %}<th class="p-2 text-center">Last Watched</th>{% endif %}
               <th class="p-2 text-center">Status</th>
               <th class="p-2 text-center">Start Date</th>

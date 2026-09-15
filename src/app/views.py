@@ -312,6 +312,8 @@ def media_search(request):
 def media_details(request, source, media_type, media_id, title):  # noqa: ARG001 title for URL
     """Return the details page for a media item."""
     media_metadata = services.get_media_metadata(media_type, media_id, source)
+    if media_type == MediaTypes.THEATER.value:
+        media_id = media_metadata["media_id"]
     user_medias = BasicMedia.objects.filter_media_prefetch(
         request.user,
         media_id,
@@ -472,6 +474,12 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
             source,
             [season_number],
         )
+        theater_defaults = (
+            {"theater_forms": metadata["theater_forms"]}
+            if media_type == MediaTypes.THEATER.value
+            else {}
+        )
+        media_id = metadata["media_id"] if theater_defaults else media_id
         item, _ = Item.objects.update_or_create(
             media_id=media_id,
             source=source,
@@ -480,6 +488,7 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
             defaults={
                 "title": metadata["title"],
                 "image": metadata["image"],
+                **theater_defaults,
             },
         )
         title = metadata["title"]
@@ -557,6 +566,12 @@ def track_modal(
     season_number=None,
 ):
     """Return the tracking form for a media item."""
+    if (
+        media_type == MediaTypes.THEATER.value
+        and source == Sources.WIKIDATA.value
+        and not request.GET.get("instance_id")
+    ):
+        media_id = services.get_media_metadata(media_type, media_id, source)["media_id"]
     instance_id = request.GET.get("instance_id")
     if instance_id:
         media = BasicMedia.objects.get_media(
@@ -633,6 +648,10 @@ def media_save(request):
             source,
             [season_number],
         )
+        theater_defaults = {}
+        if media_type == MediaTypes.THEATER.value:
+            media_id = metadata["media_id"]
+            theater_defaults["theater_forms"] = metadata["theater_forms"]
         item, _ = Item.objects.get_or_create(
             media_id=media_id,
             source=source,
@@ -641,6 +660,7 @@ def media_save(request):
             defaults={
                 "title": metadata["title"],
                 "image": metadata["image"],
+                **theater_defaults,
             },
         )
         model = apps.get_model(app_label="app", model_name=media_type)
@@ -755,7 +775,11 @@ def create_entry(request):
     """Return the form for manually adding media items."""
     if request.method == "GET":
         media_types = MediaTypes.values
-        return render(request, "app/create_entry.html", {"media_types": media_types})
+        return render(
+            request,
+            "app/create_entry.html",
+            {"media_types": media_types, "form": ManualItemForm(user=request.user)},
+        )
 
     # Process the form submission
     form = ManualItemForm(request.POST, user=request.user)

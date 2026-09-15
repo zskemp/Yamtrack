@@ -1,8 +1,10 @@
 import csv
+import json
 from datetime import UTC, datetime
 from io import StringIO
 
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db.models import Q
 from django.test import TestCase
 from django.urls import reverse
@@ -19,7 +21,109 @@ from app.models import (
     Season,
     Sources,
     Status,
+    Theater,
 )
+
+
+class TheaterExportRestoreTest(TestCase):
+    """Own-data endpoints retain work forms and independent attendances."""
+
+    def test_manual_attendance_round_trip(self):
+        """A fresh restore needs no external lookup or original catalog rows."""
+        owner = get_user_model().objects.create_user(username="owner")
+        self.client.force_login(owner)
+        self.client.post(
+            reverse("create_entry"),
+            {
+                "title": "Local Hybrid",
+                "media_type": "theater",
+                "theater_forms": ["play", "musical"],
+                "status": "Completed",
+                "venue": "First Theatre",
+                "end_date": "2026-09-01",
+                "notes": "First visit\nSecond line",
+            },
+        )
+        item = Item.objects.get(title="Local Hybrid")
+        self.client.post(
+            reverse("media_save"),
+            {
+                "media_id": item.media_id,
+                "media_type": "theater",
+                "source": "manual",
+                "status": "Planning",
+                "venue": "Second Theatre",
+                "location": "Paris",
+                "production": "Local Company",
+                "notes": "Return visit",
+                "score": 8,
+            },
+        )
+        response = self.client.get(reverse("export_csv"))
+        content = b"".join(response.streaming_content)
+        rows = list(csv.DictReader(StringIO(content.decode())))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(json.loads(rows[0]["theater_forms"]), ["play", "musical"])
+        item.delete()
+        recipient = get_user_model().objects.create_user(username="recipient")
+        self.client.force_login(recipient)
+        response = self.client.post(
+            reverse("import_yamtrack"),
+            {
+                "mode": "new",
+                "yamtrack_csv": SimpleUploadedFile(
+                    "theater.csv", content, content_type="text/csv"
+                ),
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(Theater.objects.filter(user=recipient).count(), 2)
+        self.assertEqual(Theater.objects.filter(user=owner).count(), 0)
+        restored = Item.objects.get(title="Local Hybrid")
+        self.assertEqual(restored.theater_forms, ["play", "musical"])
+        first = Theater.objects.get(user=recipient, venue="First Theatre")
+        self.assertEqual(first.end_date.date().isoformat(), "2026-09-01")
+        self.assertEqual(first.notes, "First visit\nSecond line")
+        second = Theater.objects.get(user=recipient, venue="Second Theatre")
+        self.assertEqual(second.production, "Local Company")
+        self.assertEqual(second.location, "Paris")
+        self.assertEqual(second.score, 8)
+        broken = StringIO()
+        writer = csv.DictWriter(broken, fieldnames=rows[0].keys())
+        writer.writeheader()
+        for row in rows:
+            row["theater_forms"] = '["film"]'
+            writer.writerow(row)
+        self.client.post(
+            reverse("import_yamtrack"),
+            {
+                "mode": "overwrite",
+                "yamtrack_csv": SimpleUploadedFile(
+                    "invalid.csv", broken.getvalue().encode()
+                ),
+            },
+        )
+        self.assertEqual(Theater.objects.filter(user=recipient).count(), 2)
+        self.assertEqual(
+            Item.objects.get(pk=restored.pk).theater_forms, ["play", "musical"]
+        )
+        broken = StringIO()
+        writer = csv.DictWriter(broken, fieldnames=rows[0].keys())
+        writer.writeheader()
+        for row in rows:
+            row.update(title="", theater_forms='["play"]')
+            writer.writerow(row)
+        self.client.post(
+            reverse("import_yamtrack"),
+            {
+                "mode": "overwrite",
+                "yamtrack_csv": SimpleUploadedFile(
+                    "invalid.csv", broken.getvalue().encode()
+                ),
+            },
+        )
+        self.assertEqual(Theater.objects.filter(user=recipient).count(), 2)
+        self.assertEqual(Item.objects.get(pk=restored.pk).title, "Local Hybrid")
 
 
 class ExportCSVTest(TestCase):

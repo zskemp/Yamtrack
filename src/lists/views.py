@@ -274,14 +274,17 @@ def lists_modal(
             [season_number],
             episode_number,
         )
-        item = Item.objects.create(
-            media_id=media_id,
+        item, _ = Item.objects.get_or_create(
+            media_id=metadata.get("media_id", media_id),
             source=source,
             media_type=media_type,
             season_number=season_number,
             episode_number=episode_number,
-            title=metadata["title"],
-            image=metadata["image"],
+            defaults={
+                "title": metadata["title"],
+                "image": metadata["image"],
+                "theater_forms": metadata.get("theater_forms", []),
+            },
         )
 
     custom_lists = CustomList.objects.get_user_lists_with_item(request.user, item)
