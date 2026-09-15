@@ -44,9 +44,23 @@ Theater works do not generate release-calendar events.
 Commons images are eligible through a work's direct P18 image/P154 logo claim or verified
 exact-work P180 depiction statements. Enrichment runs only for the displayed
 page, not every candidate. Each work examines up to five direct files and, if
-none qualify, three depiction candidates. Requests are serial and reuse the
+none qualify, up to twelve exact-depiction candidates. Requests are serial and reuse the
 provider transport. Successful artwork selections are cached for one hour;
 Commons rate-limit responses impose a shared retry cooldown.
+File metadata is fetched in groups of three with at most one continuation request
+per group. Rights checks run only after that group's metadata is complete; a
+revision change or unfinished continuation is unavailable data, not a confirmed
+rejection. A later optional batch failure does not discard an image already
+qualified from a completed batch. Partial scans are not cached, allowing a later
+retry to select a preferred image. No recursive image search is performed.
+Displayed-page enrichment shares a 24-request Commons budget and stops scheduling
+new artwork calls after 20 seconds. Each HTTP wait is limited to at most eight
+seconds or the remaining budget, whichever is smaller. Cached qualified artwork
+does not consume calls. These are scheduling and network-wait limits, not a hard
+wall-clock guarantee covering DNS, shared throttling, retries or Wikidata discovery.
+Budget exhaustion retains eligible results and any already-qualified artwork;
+later detail requests get a fresh budget. Other providers retain their default
+HTTP timeout.
 Transient failures preserve already-saved artwork and credit rather than replacing
 them with a placeholder. Explicit metadata sync invalidates the work's Commons
 selection and refuses to overwrite artwork when that lookup is unavailable.
@@ -128,6 +142,10 @@ For ballet, ordinary versions and re-choreographies should share a work when the
 underlying relationship is verified; clearly authored reinventions remain distinct
 adaptations. Derivation alone does not prove equivalence. Current source data does
 not provide a reliable general mapping for these non-redirect grouping cases.
+In particular, a version/edition property is not by itself a choreography mapping:
+observed P629 ballet-parent records include libretto editions. The named Raisin
+staging conflict and the Swan Lake/Nutcracker variants have request regressions
+that retain their supported granularity rather than infer equivalence.
 
 ## Sources
 

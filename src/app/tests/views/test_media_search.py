@@ -218,6 +218,496 @@ class TheaterDiscoveryTests(TestCase):
         response._content = json.dumps(data).encode()
         return response
 
+    def test_artwork_metadata_continuation_preserves_complete_rights_checks(self):
+        """Paginated file metadata is merged before accepting or rejecting an image."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )
+        self.entities["Q822850"] = fixture["work"]
+        self.search_ids = ["Q822850"]
+        page = fixture["commons"]["query"]["pages"]["123"]
+        final_templates = page.pop("templates")
+        continuation_pending = False
+        final_revision = page["lastrevid"]
+        malformed_continuation = False
+
+        def source_response(url, params, **kwargs):
+            if "commons.wikimedia.org" not in url:
+                return self.source_response(url, params, **kwargs)
+            if params.get("list") == "search":
+                payload = {"query": {"search": []}}
+            elif "tlcontinue" in params:
+                payload = {
+                    "query": {
+                        "pages": {
+                            "123": {
+                                "pageid": 123,
+                                "title": page["title"],
+                                "templates": final_templates,
+                                "lastrevid": final_revision,
+                            }
+                        }
+                    }
+                }
+                if continuation_pending:
+                    payload["continue"] = {"tlcontinue": "123|More", "continue": "||"}
+                if malformed_continuation:
+                    payload = {}
+            else:
+                payload = {
+                    **fixture["commons"],
+                    "continue": {"tlcontinue": "123|Template", "continue": "||"},
+                }
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(payload).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+            )
+            self.assertContains(response, page["imageinfo"][0]["url"])
+            self.assertContains(response, "Test Photographer")
+            self.client.post(
+                reverse("media_save"),
+                {
+                    "media_id": "Q822850",
+                    "media_type": "theater",
+                    "source": "wikidata",
+                    "status": "Completed",
+                },
+            )
+            continuation_pending = True
+            cache.clear()
+            incomplete = self.client.get(
+                reverse(
+                    "media_details", args=["wikidata", "theater", "Q822850", "bernarda"]
+                )
+            )
+            self.assertEqual(
+                Item.objects.get(media_id="Q822850").image, page["imageinfo"][0]["url"]
+            )
+            continuation_pending = False
+            malformed_continuation = True
+            cache.clear()
+            incomplete = self.client.get(
+                reverse(
+                    "media_details", args=["wikidata", "theater", "Q822850", "bernarda"]
+                )
+            )
+            self.assertTrue(incomplete.context["media"]["artwork_unavailable"])
+            self.assertContains(incomplete, "Test Photographer")
+            malformed_continuation = False
+            final_revision += 1
+            cache.clear()
+            self.client.get(
+                reverse(
+                    "media_details", args=["wikidata", "theater", "Q822850", "bernarda"]
+                )
+            )
+            self.assertEqual(
+                Item.objects.get(media_id="Q822850").image, page["imageinfo"][0]["url"]
+            )
+            final_revision = page["lastrevid"]
+            final_templates.append({"title": "Template:No permission since"})
+            cache.clear()
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+            )
+            self.assertNotContains(response, page["imageinfo"][0]["url"])
+            self.assertContains(response, "The House of Bernarda Alba")
+
+    def test_invalid_file_continuations_leave_work_results_available(self):
+        """Missing files and malformed continuation fragments never qualify images."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )
+        self.entities["Q822850"] = fixture["work"]
+        self.search_ids = ["Q822850"]
+        mode = "missing_file"
+
+        def source_response(url, params, **kwargs):
+            if "commons.wikimedia.org" not in url:
+                return self.source_response(url, params, **kwargs)
+            if params.get("list") == "search":
+                payload = {"query": {"search": []}}
+            elif "tlcontinue" in params:
+                pages = {
+                    "missing_file": {
+                        "-1": {"title": "File:Test stage photograph.jpg", "missing": ""}
+                    },
+                    "same_id_missing": {"123": {"pageid": 123, "missing": ""}},
+                    "missing_revision": {"123": {"pageid": 123, "templates": []}},
+                }
+                payload = {"query": {"pages": pages[mode]}}
+            else:
+                continuation = (
+                    ["invalid"]
+                    if mode == "invalid_token"
+                    else {"tlcontinue": "123|Next", "continue": "||"}
+                )
+                payload = {**fixture["commons"], "continue": continuation}
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(payload).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            for mode in (
+                "missing_file",
+                "same_id_missing",
+                "missing_revision",
+                "invalid_token",
+            ):
+                with self.subTest(mode=mode):
+                    cache.clear()
+                    response = self.client.get(
+                        reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                    )
+                    self.assertContains(response, "The House of Bernarda Alba")
+                    result = response.context["data"]["results"][0]["item"]
+                    self.assertTrue(result["artwork_unavailable"])
+                    self.assertFalse(result["theater_artwork"])
+
+    def test_later_artwork_batch_failure_keeps_an_already_verified_image(self):
+        """A failed optional candidate batch cannot discard a verified image."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )
+        fixture["work"]["claims"]["P18"] = [
+            {"mainsnak": {"datavalue": {"value": filename}}}
+            for filename in [
+                "Test stage photograph.jpg",
+                "Second.jpg",
+                "Third.jpg",
+                "Unavailable.jpg",
+            ]
+        ]
+        self.entities["Q822850"] = fixture["work"]
+        self.search_ids = ["Q822850"]
+        recovered = False
+        poster_url = "https://thumb.wikimedia.org/wikipedia/commons/stage-poster.png"
+
+        def source_response(url, params, **kwargs):
+            if "commons.wikimedia.org" not in url:
+                return self.source_response(url, params, **kwargs)
+            payload = fixture["commons"]
+            if "Unavailable.jpg" in params.get("titles", ""):
+                if not recovered:
+                    raise requests.Timeout
+                payload = json.loads(json.dumps(payload))
+                poster = payload["query"]["pages"]["123"]
+                poster.update(pageid=124, title="File:Stage Poster.png")
+                poster["imageinfo"][0].update(url=poster_url, thumburl=poster_url)
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(payload).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+            )
+            details = self.client.get(
+                reverse(
+                    "media_details", args=["wikidata", "theater", "Q822850", "bernarda"]
+                )
+            )
+            self.assertContains(details, "Test Photographer")
+            recovered = True
+            retry = self.client.get(
+                reverse(
+                    "media_details", args=["wikidata", "theater", "Q822850", "bernarda"]
+                )
+            )
+            self.assertContains(retry, poster_url)
+        self.assertContains(
+            response, fixture["commons"]["query"]["pages"]["123"]["imageinfo"][0]["url"]
+        )
+        self.assertContains(response, "Test Photographer")
+
+    def test_depiction_candidate_window_reaches_a_later_usable_image(self):
+        """Unusable early depicts hits must not hide a later matching image."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )
+        fixture["work"]["claims"].pop("P18")
+        self.entities["Q822850"] = fixture["work"]
+        self.search_ids = ["Q822850"]
+        page = fixture["commons"]["query"]["pages"]["123"]
+        page["imageinfo"][0]["extmetadata"]["ImageDescription"] = {
+            "value": "Performance of the play"
+        }
+
+        def source_response(url, params, **kwargs):
+            if "commons.wikimedia.org" not in url:
+                return self.source_response(url, params, **kwargs)
+            if params.get("list") == "search":
+                hits = [
+                    {"pageid": identifier, "title": f"File:Stage {identifier}.png"}
+                    for identifier in range(120, 124)
+                ]
+                payload = {"query": {"search": hits[: params["srlimit"]]}}
+            elif params["action"] == "wbgetentities":
+                payload = {
+                    "entities": {
+                        identifier: {
+                            "statements": {
+                                "P180": [
+                                    {
+                                        "mainsnak": {
+                                            "datavalue": {"value": {"id": "Q822850"}}
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                        for identifier in params["ids"].split("|")
+                    }
+                }
+            else:
+                pages = {}
+                for title in params["titles"].split("|"):
+                    identifier = int(
+                        title.removeprefix("File:Stage ").removesuffix(".png")
+                    )
+                    candidate = json.loads(json.dumps(page))
+                    candidate.update(pageid=identifier, title=title)
+                    if identifier != page["pageid"]:
+                        candidate["imageinfo"][0]["extmetadata"]["Restrictions"] = {
+                            "value": "unresolved rights"
+                        }
+                    pages[str(identifier)] = candidate
+                payload = {"query": {"pages": pages}}
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(payload).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+            )
+        self.assertContains(response, page["imageinfo"][0]["url"])
+        self.assertContains(response, "Test Photographer")
+
+    def test_artwork_deadline_is_shared_across_displayed_works(self):
+        """Slow image enrichment stops without losing eligible work results."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )
+        self.entities["Q822850"] = fixture["work"]
+        self.entities["Q822851"] = {
+            **fixture["work"],
+            "id": "Q822851",
+            "labels": {"en": {"value": "Second stage work"}},
+        }
+        self.search_ids = ["Q822850", "Q822851"]
+        elapsed = 0
+
+        def source_response(url, params, **kwargs):
+            nonlocal elapsed
+            if "commons.wikimedia.org" not in url:
+                return self.source_response(url, params, **kwargs)
+            elapsed += 21
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(fixture["commons"]).encode()
+            return response
+
+        with (
+            patch("app.providers.services.session.get", side_effect=source_response),
+            patch(
+                "app.providers.commons.monotonic",
+                side_effect=lambda: elapsed,
+                create=True,
+            ),
+        ):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "stage"}
+            )
+        results = response.context["data"]["results"]
+        self.assertEqual(len(results), 2)
+        self.assertTrue(results[0]["item"]["theater_artwork"])
+        self.assertFalse(results[1]["item"]["theater_artwork"])
+        self.assertContains(response, "Second stage work")
+
+    def test_artwork_request_budget_limits_a_page_without_hiding_works(self):
+        """Fast responses still respect the page call cap and next requests reset it."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )
+        fixture["work"]["claims"]["P18"] = [
+            {"mainsnak": {"datavalue": {"value": filename}}}
+            for filename in ["First.png", "Second.png", "Third.png", "Fourth.png"]
+        ]
+        self.search_ids = [f"Q{number}" for number in range(40000, 40020)]
+        self.entities.update(
+            {
+                identifier: {**fixture["work"], "id": identifier}
+                for identifier in self.search_ids
+            }
+        )
+
+        def source_response(url, params, **kwargs):
+            if "commons.wikimedia.org" not in url:
+                return self.source_response(url, params, **kwargs)
+            self.assertGreater(kwargs["timeout"], 0)
+            self.assertLessEqual(kwargs["timeout"], 8)
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(fixture["commons"]).encode()
+            return response
+
+        with (
+            patch("app.providers.services.session.get", side_effect=source_response),
+            patch("app.providers.commons.monotonic", return_value=0),
+        ):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "stage"}
+            )
+            results = response.context["data"]["results"]
+            self.assertEqual(len(results), 20)
+            self.assertEqual(
+                sum(bool(result["item"]["theater_artwork"]) for result in results), 12
+            )
+            details = self.client.get(
+                reverse(
+                    "media_details", args=["wikidata", "theater", "Q40019", "stage"]
+                )
+            )
+            self.assertContains(details, "Test Photographer")
+
+    def test_libretto_editions_do_not_inherit_their_parent_ballet_identity(self):
+        """Real P629 libretto records are not interchangeable ballet works."""
+        records = [
+            ("Q19240000", 2491025360, "Yanko libretto edition", "Q21056532"),
+            ("Q19187271", 2491023377, "La Peri libretto edition", "Q1158756"),
+        ]
+        self.search_ids = []
+        for identifier, revision, title, parent in records:
+            self.entities[identifier] = {
+                "id": identifier,
+                "lastrevid": revision,
+                "labels": {"en": {"value": title}},
+                "claims": {
+                    "P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q3331189"}}}}],
+                    "P629": [{"mainsnak": {"datavalue": {"value": {"id": parent}}}}],
+                },
+            }
+            self.entities[parent] = {
+                "id": parent,
+                "labels": {"en": {"value": "Underlying ballet"}},
+                "claims": {
+                    "P7937": [
+                        {"mainsnak": {"datavalue": {"value": {"id": "Q15079786"}}}}
+                    ]
+                },
+            }
+            self.search_ids.extend([identifier, parent])
+        response = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "ballet"}
+        )
+        self.assertEqual(
+            {
+                result["item"]["media_id"]
+                for result in response.context["data"]["results"]
+            },
+            {"Q21056532", "Q1158756"},
+        )
+        self.assertFalse(TheaterRedirect.objects.exists())
+
+    def test_named_source_relationships_do_not_create_speculative_equivalence(self):
+        """Real staging/derivation records retain their supported granularity."""
+        records = [
+            (
+                "Q300532",
+                "A Raisin in the Sun",
+                2515858838,
+                {"P31": ["Q7725634"], "P7937": ["Q25379"], "P50": ["Q461758"]},
+            ),
+            (
+                "Q105430183",
+                "A Raisin in the Sun",
+                2538267855,
+                {
+                    "P31": ["Q7725634"],
+                    "P7937": ["Q25379"],
+                    "P50": ["Q461758"],
+                    "P272": ["Q2989791"],
+                    "P57": ["Q100450648"],
+                    "P161": ["Q16637374"],
+                    "P144": ["Q300534"],
+                },
+            ),
+            (
+                "Q199786",
+                "Swan Lake",
+                2526633021,
+                {"P31": ["Q15079786"], "P86": ["Q7315"], "P4969": ["Q1044928"]},
+            ),
+            (
+                "Q1044928",
+                "Swan Lake",
+                2519039384,
+                {"P31": ["Q15079786"], "P144": ["Q199786"], "P1809": ["Q1139570"]},
+            ),
+            (
+                "Q193705",
+                "The Nutcracker",
+                2515962484,
+                {"P31": ["Q58483088"], "P7937": ["Q15079786"], "P86": ["Q7315"]},
+            ),
+            (
+                "Q7754522",
+                "The Nutcracker",
+                2279128594,
+                {"P31": ["Q15079786"], "P1809": ["Q310184"]},
+            ),
+        ]
+        self.search_ids = []
+        for identifier, title, revision, properties in records:
+            self.search_ids.append(identifier)
+            self.entities[identifier] = {
+                "id": identifier,
+                "lastrevid": revision,
+                "labels": {"en": {"value": title}},
+                "claims": {
+                    property_id: [
+                        {
+                            "rank": "normal",
+                            "mainsnak": {"datavalue": {"value": {"id": value}}},
+                        }
+                        for value in values
+                    ]
+                    for property_id, values in properties.items()
+                },
+            }
+        response = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "stage works"}
+        )
+        self.assertEqual(
+            [
+                result["item"]["media_id"]
+                for result in response.context["data"]["results"]
+            ],
+            ["Q300532", "Q199786", "Q1044928", "Q193705", "Q7754522"],
+        )
+        for identifier in ("Q199786", "Q1044928", "Q193705", "Q7754522"):
+            self.client.post(
+                reverse("media_save"),
+                {
+                    "media_id": identifier,
+                    "media_type": "theater",
+                    "source": "wikidata",
+                    "status": "Completed",
+                },
+            )
+        self.assertEqual(Theater.objects.filter(user=self.user).count(), 4)
+        self.assertEqual(Item.objects.filter(media_type="theater").count(), 4)
+        self.assertFalse(TheaterRedirect.objects.exists())
+
     def test_public_domain_logo_and_standard_notices_remain_usable(self):
         """Published public-domain bases and standard notices do not hide images."""
         fixture = json.loads(

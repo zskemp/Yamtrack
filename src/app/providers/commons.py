@@ -2,12 +2,17 @@
 
 import logging
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
+from time import monotonic
 from urllib.parse import urlsplit
 
 import requests
 from bs4 import BeautifulSoup
+from django.conf import settings
 from django.core.cache import cache
 from django.utils import timezone
 from django.utils.html import strip_tags
@@ -17,13 +22,44 @@ from app.providers import services
 
 logger = logging.getLogger(__name__)
 BASE_URL = "https://commons.wikimedia.org/w/api.php"
-POLICY_VERSION = 5
+POLICY_VERSION = 6
 LEGACY_POLICY_VERSION = 3
 MIN_IMAGE_DIMENSION = 200
+DEPICTION_CANDIDATE_LIMIT = 12
+ARTWORK_REQUEST_LIMIT = 24
+ARTWORK_TIME_LIMIT = 20
+ARTWORK_HTTP_TIMEOUT = 8
+_request_budget = ContextVar("commons_request_budget", default=None)
 
 
 class ArtworkUnavailableError(Exception):
     """Transient provider failure, distinct from a rejected asset."""
+
+
+@dataclass
+class ArtworkBudget:
+    """Share enrichment effort across every work in a request."""
+
+    deadline: float
+    remaining: int = ARTWORK_REQUEST_LIMIT
+
+    def reserve(self):
+        """Reserve one HTTP call with a timeout bounded by the remaining time."""
+        remaining_time = self.deadline - monotonic()
+        if self.remaining <= 0 or remaining_time <= 0:
+            raise ArtworkUnavailableError
+        self.remaining -= 1
+        return min(remaining_time, ARTWORK_HTTP_TIMEOUT, settings.REQUEST_TIMEOUT)
+
+
+@contextmanager
+def request_budget():
+    """Scope an artwork budget to a page without leaking across users/threads."""
+    token = _request_budget.set(ArtworkBudget(monotonic() + ARTWORK_TIME_LIMIT))
+    try:
+        yield
+    finally:
+        _request_budget.reset(token)
 
 
 LICENSES = {
@@ -378,6 +414,7 @@ def complete_credit(artwork):
     if not isinstance(rights, dict) or artwork.get("policy") not in {
         3,
         4,
+        5,
         POLICY_VERSION,
     }:
         return False
@@ -435,6 +472,12 @@ def request_data(params):
     """Use existing transport while respecting Wikimedia back-pressure."""
     if cache.get("commons_retry_after"):
         raise ArtworkUnavailableError
+    budget = _request_budget.get()
+    timeout = (
+        budget.reserve()
+        if budget
+        else min(ARTWORK_HTTP_TIMEOUT, settings.REQUEST_TIMEOUT)
+    )
     try:
         response = services.api_request(
             Sources.WIKIDATA.value,
@@ -442,6 +485,7 @@ def request_data(params):
             BASE_URL,
             params={"format": "json", **params},
             headers={"User-Agent": "Yamtrack (https://github.com/FuzzyGrim/Yamtrack)"},
+            timeout=timeout,
         )
     except requests.RequestException as error:
         response = getattr(error, "response", None)
@@ -461,17 +505,17 @@ def request_data(params):
 
 
 def depicted_files(work_id):
-    """Find at most three exact-work depictions and verify their statements."""
+    """Find a bounded set of exact-work depictions and verify their statements."""
     response = request_data(
         {
             "action": "query",
             "list": "search",
             "srnamespace": 6,
-            "srlimit": 3,
+            "srlimit": DEPICTION_CANDIDATE_LIMIT,
             "srsearch": f"haswbstatement:P180={work_id}",
         }
     )
-    hits = response.get("query", {}).get("search", [])[:3]
+    hits = response.get("query", {}).get("search", [])[:DEPICTION_CANDIDATE_LIMIT]
     if not hits:
         return []
     entities = request_data(
@@ -498,28 +542,62 @@ def depicted_files(work_id):
     ]
 
 
+def merge_file_metadata(merged, response):
+    """Reject malformed fragments before merging rights-bearing file metadata."""
+    pages = response.get("query", {}).get("pages")
+    if not isinstance(pages, dict) or not pages:
+        raise ArtworkUnavailableError
+    if merged and set(pages) != set(merged):
+        raise ArtworkUnavailableError
+    for page_id, page in pages.items():
+        if not isinstance(page, dict):
+            raise ArtworkUnavailableError
+        previous = merged.setdefault(page_id, {})
+        if previous and "missing" in page:
+            raise ArtworkUnavailableError
+        if "missing" not in page and (
+            (response.get("continue") and not isinstance(page.get("lastrevid"), int))
+            or (previous and previous.get("lastrevid") != page.get("lastrevid"))
+        ):
+            raise ArtworkUnavailableError
+        for key, value in page.items():
+            if key in {"templates", "categories"}:
+                if not isinstance(value, list):
+                    raise ArtworkUnavailableError
+                previous.setdefault(key, []).extend(value)
+            else:
+                previous[key] = value
+
+
 def image_pages(filenames):
     """Fetch file rights and warning metadata in small complete batches."""
-    pages = []
     for offset in range(0, len(filenames), 3):
-        response = request_data(
-            {
-                "action": "query",
-                "redirects": 1,
-                "titles": "|".join(
-                    f"File:{filename}" for filename in filenames[offset : offset + 3]
-                ),
-                "prop": "imageinfo|categories|templates|info",
-                "cllimit": 500,
-                "tllimit": 500,
-                "iiprop": "url|size|mime|timestamp|sha1|extmetadata|badfile",
-                "iiurlwidth": 300,
-                "iiextmetadatalanguage": "en",
-            }
-        )
-        if "continue" not in response:
-            pages.extend(response.get("query", {}).get("pages", {}).values())
-    return pages
+        params = {
+            "action": "query",
+            "redirects": 1,
+            "titles": "|".join(
+                f"File:{filename}" for filename in filenames[offset : offset + 3]
+            ),
+            "prop": "imageinfo|categories|templates|info",
+            "cllimit": 500,
+            "tllimit": 500,
+            "iiprop": "url|size|mime|timestamp|sha1|extmetadata|badfile",
+            "iiurlwidth": 300,
+            "iiextmetadatalanguage": "en",
+        }
+        merged = {}
+        continuation = {}
+        for _page in range(2):
+            response = request_data({**params, **continuation})
+            if "continue" in response and not isinstance(response["continue"], dict):
+                raise ArtworkUnavailableError
+            merge_file_metadata(merged, response)
+            continuation = response.get("continue", {})
+            if not continuation:
+                break
+        if continuation:
+            raise ArtworkUnavailableError
+        yield from merged.values()
 
 
 def artwork(work_id, filenames, revision, work_forms=()):
@@ -555,6 +633,21 @@ def suitable_for_work(page, work_forms, *, enrichment=False):
     )
 
 
+def verified_candidates(filenames, work_forms, *, enrichment=False):
+    """Keep complete verified candidates if a later optional batch is unavailable."""
+    candidates = []
+    try:
+        for page in image_pages(filenames):
+            if not suitable_for_work(page, work_forms, enrichment=enrichment):
+                continue
+            candidate = qualified_image(page)
+            if candidate:
+                candidates.append(candidate)
+    except ArtworkUnavailableError:
+        return candidates, True
+    return candidates, False
+
+
 def select_artwork(work_id, filenames, revision, work_forms):
     """Select a reusable work image from at most five direct candidates."""
     filenames = list(
@@ -568,21 +661,18 @@ def select_artwork(work_id, filenames, revision, work_forms):
         and cached.get("work_forms") == list(work_forms)
     ):
         return cached
-    candidates = [
-        qualified_image(page)
-        for page in image_pages(filenames)
-        if suitable_for_work(page, work_forms)
-    ]
-    candidates = [candidate for candidate in candidates if candidate]
+    candidates, unavailable = verified_candidates(filenames, work_forms)
     evidence = "P18/P154"
     if not candidates:
         evidence = "P180"
-        for page in image_pages(depicted_files(work_id)):
-            if not suitable_for_work(page, work_forms, enrichment=True):
-                continue
-            candidate = qualified_image(page)
-            if candidate:
-                candidates.append(candidate)
+        candidates, depiction_unavailable = verified_candidates(
+            depicted_files(work_id),
+            work_forms,
+            enrichment=True,
+        )
+        unavailable = unavailable or depiction_unavailable
+    if not candidates and unavailable:
+        raise ArtworkUnavailableError
     candidates.sort(
         key=lambda candidate: (
             "poster" not in candidate["title"].casefold(),
@@ -597,6 +687,8 @@ def select_artwork(work_id, filenames, revision, work_forms):
             work_revision=revision,
             evidence=evidence,
             work_forms=list(work_forms),
+            selection_complete=not unavailable,
         )
-        cache.set(key, selected, 3600)
+        if not unavailable:
+            cache.set(key, selected, 3600)
     return selected

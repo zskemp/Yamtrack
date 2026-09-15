@@ -218,6 +218,9 @@ def illustrate(work):
         work["theater_forms"],
     )
     work["artwork_unavailable"] = artwork is None
+    work["artwork_partial"] = bool(artwork) and not artwork.get(
+        "selection_complete", True
+    )
     if artwork and artwork["work_id"] != work["media_id"]:
         artwork = theater_identity.retarget_artwork(artwork, work["media_id"])
     work.update(
@@ -228,6 +231,7 @@ def illustrate(work):
     return work
 
 
+@commons.request_budget()
 def theater(media_id):
     """Resolve a work identity and reject unsupported or ambiguous records."""
     if not re.fullmatch(r"Q[1-9][0-9]*", media_id):
@@ -244,11 +248,12 @@ def theater(media_id):
         )
     theater_identity.record_redirect(media_id, entity)
     result = illustrate(hydrate([entity])[0])
-    if not result.get("artwork_unavailable"):
+    if not result.get("artwork_unavailable") and not result.get("artwork_partial"):
         cache.set(f"wikidata_theater_{result['media_id']}", result, 3600)
     return result
 
 
+@commons.request_budget()
 def search(query, page):
     """Filter a bounded candidate window before canonical result pagination."""
     literal = " ".join(query.split())[:200]
