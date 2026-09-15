@@ -13,7 +13,7 @@ from django.utils.dateparse import parse_datetime
 import app
 from app import config
 from app.models import MediaTypes, Sources
-from app.providers import services
+from app.providers import commons, services
 from app.templatetags import app_tags
 from integrations.imports import helpers
 from integrations.imports.helpers import MediaImportError, MediaImportUnexpectedError
@@ -200,7 +200,28 @@ class YamtrackImporter:
             return None
         if not row.get("image"):
             row["image"] = settings.IMG_NONE
-        return {"theater_forms": work_forms}
+        artwork = self._theater_artwork(row)
+        return {"theater_forms": work_forms, "theater_artwork": artwork}
+
+    def _theater_artwork(self, row):
+        """Never restore a provider image while dropping its required credit."""
+        if row["source"] != Sources.WIKIDATA.value:
+            return {}
+        try:
+            artwork = commons.restored_artwork(
+                json.loads(row.get("theater_artwork") or "{}"),
+                row["media_id"],
+                row["image"],
+            )
+        except (ValueError, TypeError):
+            artwork = {}
+        if not artwork and row["image"] != settings.IMG_NONE:
+            self.warnings.append(
+                f"{row['title']}: Artwork omitted because its credit is "
+                "missing or invalid."
+            )
+            row["image"] = settings.IMG_NONE
+        return artwork
 
     def _handle_missing_metadata(self, row, media_type, season_number, episode_number):
         """Handle missing metadata by fetching from provider."""

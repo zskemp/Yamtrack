@@ -2,8 +2,12 @@ import csv
 import json
 from datetime import UTC, datetime
 from io import StringIO
+from pathlib import Path
+from unittest.mock import patch
 
+import requests
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db.models import Q
 from django.test import TestCase
@@ -27,6 +31,93 @@ from app.models import (
 
 class TheaterExportRestoreTest(TestCase):
     """Own-data endpoints retain work forms and independent attendances."""
+
+    def setUp(self):
+        """Keep provider fixtures isolated from other import/export tests."""
+        cache.clear()
+        self.addCleanup(cache.clear)
+
+    def test_provider_artwork_round_trip_offline(self):
+        """A licensed provider image keeps its credit through offline restore."""
+        fixture = json.loads(
+            (
+                Path(__file__).parents[2] / "app/tests/mock_data/theater_artwork.json"
+            ).read_text()
+        )
+        owner = get_user_model().objects.create_user(username="artwork-owner")
+        self.client.force_login(owner)
+
+        def source_response(url, **_kwargs):
+            response = requests.Response()
+            response.status_code = 200
+            payload = (
+                fixture["commons"]
+                if "commons.wikimedia.org" in url
+                else {"entities": {"Q822850": fixture["work"]}}
+            )
+            response._content = json.dumps(payload).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            self.client.post(
+                reverse("media_save"),
+                {
+                    "media_id": "Q822850",
+                    "media_type": "theater",
+                    "source": "wikidata",
+                    "status": "Completed",
+                    "venue": "Local Theatre",
+                },
+            )
+        content = b"".join(self.client.get(reverse("export_csv")).streaming_content)
+        Item.objects.get(media_id="Q822850").delete()
+        with patch(
+            "app.providers.services.session.get",
+            side_effect=AssertionError("Restore must not require provider access"),
+        ):
+            self.client.post(
+                reverse("import_yamtrack"),
+                {
+                    "mode": "new",
+                    "yamtrack_csv": SimpleUploadedFile("theater.csv", content),
+                },
+            )
+        work = Item.objects.get(media_id="Q822850")
+        self.assertEqual(work.theater_artwork["artist"], "Test Photographer")
+        self.assertEqual(work.theater_artwork["work_id"], "Q822850")
+        response = self.client.get(
+            reverse("medialist", args=[owner.username, "theater"])
+        )
+        self.assertContains(response, "Test Photographer")
+        self.assertContains(response, "CC BY-SA 4.0")
+        rows = list(csv.DictReader(StringIO(content.decode())))
+        artwork = json.loads(rows[0]["theater_artwork"])
+        artwork["source_url"] = "javascript:alert(1)"
+        rows[0]["theater_artwork"] = json.dumps(artwork)
+        malicious = StringIO()
+        writer = csv.DictWriter(malicious, fieldnames=rows[0].keys())
+        writer.writeheader()
+        writer.writerows(rows)
+        work.delete()
+        with patch(
+            "app.providers.services.session.get",
+            side_effect=AssertionError("Restore must remain offline"),
+        ):
+            self.client.post(
+                reverse("import_yamtrack"),
+                {
+                    "mode": "new",
+                    "yamtrack_csv": SimpleUploadedFile(
+                        "theater.csv", malicious.getvalue().encode()
+                    ),
+                },
+            )
+        response = self.client.get(
+            reverse("medialist", args=[owner.username, "theater"])
+        )
+        self.assertNotContains(response, "javascript:")
+        self.assertNotContains(response, artwork["image"])
+        self.assertEqual(Theater.objects.get().venue, "Local Theatre")
 
     def test_manual_attendance_round_trip(self):
         """A fresh restore needs no external lookup or original catalog rows."""

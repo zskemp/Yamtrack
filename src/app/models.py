@@ -95,6 +95,7 @@ class Item(CalendarTriggerMixin, models.Model):
     season_number = models.PositiveIntegerField(null=True, blank=True)
     episode_number = models.PositiveIntegerField(null=True, blank=True)
     theater_forms = models.JSONField(default=list, blank=True)
+    theater_artwork = models.JSONField(default=dict, blank=True)
 
     class Meta:
         """Meta options for the model."""

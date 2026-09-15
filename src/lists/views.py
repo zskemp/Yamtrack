@@ -284,6 +284,7 @@ def lists_modal(
                 "title": metadata["title"],
                 "image": metadata["image"],
                 "theater_forms": metadata.get("theater_forms", []),
+                "theater_artwork": metadata.get("theater_artwork", {}),
             },
         )
 

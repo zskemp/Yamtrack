@@ -178,8 +178,14 @@ def _needs_image_refresh(item, new_image):
     return not item.image or item.image == settings.IMG_NONE
 
 
-def refresh_item_image_if_missing(item, new_image):
+def refresh_item_image_if_missing(item, new_image, theater_artwork=None):
     """Update an Item's stored image when it's missing and a real one is available."""
+    if theater_artwork is not None:
+        if item.image != new_image or item.theater_artwork != theater_artwork:
+            item.image = new_image
+            item.theater_artwork = theater_artwork
+            item.save(update_fields=["image", "theater_artwork"])
+        return
     if not _needs_image_refresh(item, new_image):
         return
     item.image = new_image
@@ -205,6 +211,11 @@ def enrich_items_with_user_data(request, items, section_name):
             key = (str(item["media_id"]), item["source"])
 
         media_item = media_lookup.get(key)
+        if media_item is not None and item.get("artwork_unavailable"):
+            item.update(
+                image=media_item.item.image,
+                theater_artwork=media_item.item.theater_artwork,
+            )
         if _should_skip_completed_recommendation(
             request.user, section_name, media_item
         ):
@@ -216,10 +227,16 @@ def enrich_items_with_user_data(request, items, section_name):
             media_item.item.image = item["image"]
             items_to_refresh.append(media_item.item)
 
+        if media_item is not None and "theater_artwork" in item:
+            media_item.item.image = item["image"]
+            media_item.item.theater_artwork = item["theater_artwork"]
+            if media_item.item not in items_to_refresh:
+                items_to_refresh.append(media_item.item)
+
         enriched_items.append({"item": item, "media": media_item})
 
     if items_to_refresh:
-        Item.objects.bulk_update(items_to_refresh, ["image"])
+        Item.objects.bulk_update(items_to_refresh, ["image", "theater_artwork"])
 
     return enriched_items
 

@@ -1,0 +1,10 @@
+{% if artwork %}
+  <details class="text-xs text-gray-400 mt-2 break-words text-left">
+    <summary class="cursor-pointer">Image credit</summary>
+    <p><a href="{{ artwork.source_url }}" rel="noopener noreferrer" target="_blank" class="underline">{{ artwork.title }}</a> by {{ artwork.artist }}</p>
+    {% if artwork.credit %}<p>{{ artwork.credit }}</p>{% endif %}
+    {% if artwork.attribution %}<p>{{ artwork.attribution }}</p>{% endif %}
+    {% if artwork.permission %}<p>{{ artwork.permission }}</p>{% endif %}
+    <a href="{{ artwork.license_url }}" rel="noopener noreferrer" target="_blank" class="underline">{{ artwork.license }}</a>
+  </details>
+{% endif %}

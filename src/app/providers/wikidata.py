@@ -8,7 +8,7 @@ from django.core.cache import cache
 
 from app import helpers
 from app.models import MediaTypes, Sources, TheaterForms
-from app.providers import services
+from app.providers import commons, services
 
 BASE_URL = "https://www.wikidata.org/w/api.php"
 FORM_IDS = {
@@ -140,6 +140,9 @@ def transform(entity, related):
         "media_type": MediaTypes.THEATER.value,
         "title": label(entity),
         "image": settings.IMG_NONE,
+        "theater_artwork": {},
+        "artwork_candidates": values(entity, "P18"),
+        "work_revision": entity.get("lastrevid"),
         "theater_forms": work_forms,
         "work_description": " / ".join([details["forms"], *dict.fromkeys(creators)]),
         "synopsis": entity.get("descriptions", {})
@@ -165,28 +168,47 @@ def hydrate(work_entities):
     return [transform(entity, related) for entity in work_entities]
 
 
+def illustrate(work):
+    """Attach image and credit together after work selection and pagination."""
+    work = work.copy()
+    artwork = commons.artwork(
+        work["media_id"],
+        work.pop("artwork_candidates", []),
+        work.get("work_revision"),
+        work["theater_forms"],
+    )
+    work["artwork_unavailable"] = artwork is None
+    work.update(
+        image=(artwork or {}).get("image", settings.IMG_NONE),
+        theater_artwork=artwork or {},
+    )
+    work["artwork_policy"] = commons.POLICY_VERSION
+    return work
+
+
 def theater(media_id):
     """Resolve a work identity and reject unsupported or ambiguous records."""
     if not re.fullmatch(r"Q[1-9][0-9]*", media_id):
         services.raise_not_found_error(Sources.WIKIDATA.value, media_id, "theater")
     key = f"wikidata_theater_{media_id}"
     cached = cache.get(key)
-    if cached is not None:
+    if cached is not None and cached.get("artwork_policy") == commons.POLICY_VERSION:
         return cached
     entity = entities([media_id]).get(media_id, {})
     if not forms(entity):
         services.raise_not_found_error(
             Sources.WIKIDATA.value, media_id, "theater work with a supported form"
         )
-    result = hydrate([entity])[0]
-    cache.set(f"wikidata_theater_{result['media_id']}", result, 3600)
+    result = illustrate(hydrate([entity])[0])
+    if not result.get("artwork_unavailable"):
+        cache.set(f"wikidata_theater_{result['media_id']}", result, 3600)
     return result
 
 
 def search(query, page):
     """Filter a bounded candidate window before canonical result pagination."""
     literal = " ".join(query.split())[:200]
-    key = f"wikidata_search_v1_{literal}"
+    key = f"wikidata_search_v2_{literal}"
     cached = cache.get(key)
     if cached is None:
         escaped = literal.replace("\\", "\\\\").replace('"', '\\"')
@@ -222,7 +244,10 @@ def search(query, page):
         page,
         PAGE_SIZE,
         len(results),
-        results[(page - 1) * PAGE_SIZE : page * PAGE_SIZE],
+        [
+            illustrate(work)
+            for work in results[(page - 1) * PAGE_SIZE : page * PAGE_SIZE]
+        ],
     )
     response["limited"] = cached["limited"]
     return response

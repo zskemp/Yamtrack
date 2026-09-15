@@ -15,8 +15,10 @@
       {# Poster #}
       <div class="w-full md:w-1/4 max-w-62.5 mx-auto md:mx-0">
         <img alt="{{ media.title }}"
-             class="w-full rounded-lg shadow-lg bg-[#2a2f35] object-cover"
+               class="w-full rounded-lg shadow-lg bg-[#2a2f35] {% if media.theater_artwork %}aspect-2/3 object-contain{% else %}object-cover{% endif %}"
+               {% if media.theater_artwork %}onerror="this.onerror=null; this.src='{{ IMG_NONE|escapejs }}'"{% endif %}
              src="{{ media.image }}">
+             {% include "app/components/artwork_credit.html" with artwork=media.theater_artwork only %}
 
         <div class="mt-4 relative flex items-stretch"
              x-data="{ trackOpen: false, createOpen: false, menuOpen: false }"

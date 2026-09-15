@@ -1,8 +1,15 @@
+import base64
+import json
 import os
 from datetime import date
+from pathlib import Path
+from unittest.mock import patch
 
+import requests
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.staticfiles.testing import StaticLiveServerTestCase
+from django.core.cache import cache
 from django.utils import timezone
 from playwright.sync_api import expect, sync_playwright
 
@@ -72,6 +79,96 @@ class IntegrationTest(StaticLiveServerTestCase):
                     ),
                 )
         self.page.set_viewport_size({"width": 1280, "height": 720})
+
+    def test_theater_search_artwork_and_tracking(self):
+        """Provider search and saved artwork retain readable credits on both sizes."""
+        fixture = json.loads(
+            (Path(__file__).parent / "mock_data/theater_artwork.json").read_text()
+        )
+        image_url = fixture["commons"]["query"]["pages"]["123"]["imageinfo"][0]["url"]
+        image = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII="
+        )
+
+        def source_response(url, params, **_kwargs):
+            if "commons.wikimedia.org" in url:
+                payload = fixture["commons"]
+            elif params["action"] == "query":
+                payload = {"query": {"search": [{"title": "Q822850"}]}}
+            else:
+                payload = {"entities": {"Q822850": fixture["work"]}}
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(payload).encode()
+            return response
+
+        cache.clear()
+        self.page.route(
+            image_url, lambda route: route.fulfill(body=image, content_type="image/png")
+        )
+        try:
+            with patch(
+                "app.providers.services.session.get", side_effect=source_response
+            ):
+                desktop_width = 1280
+                for width in (desktop_width, 390):
+                    with self.subTest(width=width):
+                        self.page.set_viewport_size({"width": width, "height": 900})
+                        self.page.goto(
+                            f"{self.live_server_url}/search?media_type=theater&q=Bernarda"
+                        )
+                        picture = self.page.get_by_role(
+                            "img", name="The House of Bernarda Alba", exact=True
+                        )
+                        picture.scroll_into_view_if_needed()
+                        expect(picture).to_have_js_property("naturalWidth", 1)
+                        expect(picture).to_have_css("object-fit", "contain")
+                        self.page.get_by_text("Image credit", exact=True).click()
+                        expect(
+                            self.page.get_by_text("Test Photographer", exact=False)
+                        ).to_be_visible()
+                        self.page.get_by_title(
+                            "The House of Bernarda Alba", exact=True
+                        ).click()
+                        if width == desktop_width:
+                            self.page.get_by_role(
+                                "button", name="Add to tracker", exact=True
+                            ).click()
+                            self.page.get_by_label("Venue", exact=True).fill(
+                                "Local Theatre"
+                            )
+                            self.page.get_by_role(
+                                "button", name="Add", exact=True
+                            ).click()
+                        expect(self.page.get_by_role("main")).to_contain_text(
+                            "Local Theatre"
+                        )
+                        self.page.goto(f"{self.live_server_url}/test/theater")
+                        self.page.get_by_text("Image credit", exact=True).click()
+                        expect(
+                            self.page.get_by_role(
+                                "link", name="CC BY-SA 4.0", exact=True
+                            )
+                        ).to_be_visible()
+                        self.assertTrue(
+                            self.page.evaluate(
+                                "document.documentElement.scrollWidth"
+                                " <= window.innerWidth"
+                            )
+                        )
+            picture = self.page.get_by_role(
+                "img", name="The House of Bernarda Alba", exact=True
+            )
+            frame = picture.bounding_box()
+            self.page.route(image_url, lambda route: route.abort())
+            self.page.reload()
+            picture.scroll_into_view_if_needed()
+            expect(picture).to_have_attribute("src", settings.IMG_NONE)
+            self.assertEqual(picture.bounding_box()["height"], frame["height"])
+        finally:
+            self.page.unroute(image_url)
+            self.page.set_viewport_size({"width": 1280, "height": 720})
+            cache.clear()
 
     def test_season_progress_edit(self):
         """Test the progress edit of a season."""

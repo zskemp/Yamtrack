@@ -10,8 +10,9 @@
     <div class="relative">
       <a href="{{ media.item|media_url }}">
         <img alt="{{ media }}"
-             class="lazyload w-full aspect-2/3 {% if media.item.image != IMG_NONE %}object-cover{% endif %}"
+             class="lazyload w-full aspect-2/3 {% if media.item.theater_artwork %}object-contain{% elif media.item.image != IMG_NONE %}object-cover{% endif %}"
              data-src="{{ media.item.image }}"
+             {% if media.item.theater_artwork %}onerror="this.onerror=null; this.src='{{ IMG_NONE|escapejs }}'"{% endif %}
              src="{{ IMG_NONE }}">
       </a>
 
@@ -66,6 +67,7 @@
       <a href="{{ media.item|media_url }}"
          class="line-clamp-1 text-center text-sm font-semibold text-white transition duration-300 {% if home_status == Status.PLANNING.value %}hover:text-sky-400{% else %}hover:text-indigo-400{% endif %}"
          title="{{ media }}">{{ media }}</a>
+        {% include "app/components/artwork_credit.html" with artwork=media.item.theater_artwork only %}
     </div>
 
     {% if home_status == Status.PLANNING.value %}

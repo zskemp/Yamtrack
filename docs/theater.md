@@ -14,6 +14,9 @@ rows and their personal fields. Imports do not replace shared Theater metadata.
 Invalid classifications are reported without overwriting existing attendance.
 Theater imports require a title; absent titles are rejected before overwrite
 bookkeeping, without attempting a provider lookup.
+Artwork metadata is also JSON in CSV exports. Provider images are restored only
+with matching work identity, HTTPS Wikimedia URLs and an allowed license credit.
+Older or malformed credits fall back to a missing image without losing attendance.
 
 ## Provider Access
 
@@ -30,11 +33,45 @@ responses terminate the request rather than retry indefinitely. Saved attendance
 status and notes can be edited without an external metadata lookup.
 Theater works do not generate release-calendar events.
 
+## Artwork
+
+Commons images are eligible through a work's direct P18 image claim or verified
+exact-work P180 depiction statements. Enrichment runs only for the displayed
+page, not every candidate. Each work examines up to three direct files and, if
+none qualify, three depiction candidates. Requests are serial and reuse the
+provider transport. Successful artwork selections are cached for one hour;
+Commons rate-limit responses impose a shared retry cooldown.
+Transient failures preserve already-saved artwork and credit rather than replacing
+them with a placeholder. Explicit metadata sync invalidates the work's Commons
+selection and refuses to overwrite artwork when that lookup is unavailable.
+
+Accepted grants are CC0 1.0, CC BY 2.0/4.0 and CC BY-SA 3.0/4.0, with matching
+license-template evidence and meaningful artist attribution. Files with known
+permission, deletion, personality-rights, trademark or costume warnings are
+withheld. Other public-domain claims are not guessed safe.
+Unknown file templates, including unhandled disclaimer templates, require review
+and are withheld. Supplied notice links are retained as printable URLs.
+Exact depiction candidates also require affirmative performance/illustration descriptions;
+advertisements, audiences, adaptations and isolated set designs are excluded.
+
+Images use returned thumbnails without cropping. Image credit controls accompany
+search, details, library, home, history and list covers, preserving title, artist,
+source, license and supplied attribution/permission notices. Credits are escaped
+text, not provider HTML. Failures retain a stable frame and missing-image state.
+Compact notification-settings rows omit licensed thumbnails rather than display
+them without attribution. Offline restore requires a complete, consistent rights
+record; it cannot independently certify the truth of user-supplied export data.
+No image uploads, user-specific overrides or manual-title image matches are added.
+
+This is a conservative automated reuse policy, not a guarantee that contributed
+metadata is correct or that every third-party right has been cleared.
+
 ## Release Limitations
 
-This is not the completed image-rich Theater feature. Provider artwork is withheld
-pending work matching, per-file reuse and attribution verification. Manual image
-URLs remain supported. There is no guaranteed illustrated-provider coverage.
+This is not the completed image-rich Theater feature. Representative live grids
+still contain many missing images; the mostly-illustrated acceptance target is
+not met. Manual image URLs remain supported. Broader matching, warning coverage
+and visual review remain necessary before release.
 
 Only actual Wikidata redirects establish canonical identity. Same-title works,
 adaptations and ambiguous ballet variants remain separate; derivative-work claims

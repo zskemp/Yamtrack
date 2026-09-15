@@ -31,7 +31,7 @@ from app.models import (
     Status,
     UserMessage,
 )
-from app.providers import manual, services, tmdb
+from app.providers import commons, manual, services, tmdb
 from app.templatetags import app_tags
 from events.models import Event
 from users.models import (
@@ -323,8 +323,15 @@ def media_details(request, source, media_type, media_id, title):  # noqa: ARG001
     current_instance = user_medias[0] if user_medias else None
 
     if current_instance is not None:
+        if media_metadata.get("artwork_unavailable"):
+            media_metadata.update(
+                image=current_instance.item.image,
+                theater_artwork=current_instance.item.theater_artwork,
+            )
         helpers.refresh_item_image_if_missing(
-            current_instance.item, media_metadata.get("image")
+            current_instance.item,
+            media_metadata.get("image"),
+            media_metadata.get("theater_artwork"),
         )
 
     # Enrich related items with user tracking data
@@ -466,6 +473,7 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
         logger.error(msg)
     else:
         deleted = cache.delete(cache_key)
+        cache.delete(f"commons_v{commons.POLICY_VERSION}_{media_id}")
         logger.debug("%s - Old cache deleted: %s", cache_key, deleted)
 
         metadata = services.get_media_metadata(
@@ -475,11 +483,15 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
             [season_number],
         )
         theater_defaults = (
-            {"theater_forms": metadata["theater_forms"]}
+            {
+                "theater_forms": metadata["theater_forms"],
+                "theater_artwork": metadata.get("theater_artwork", {}),
+            }
             if media_type == MediaTypes.THEATER.value
             else {}
         )
         media_id = metadata["media_id"] if theater_defaults else media_id
+        commons.require_available(metadata)
         item, _ = Item.objects.update_or_create(
             media_id=media_id,
             source=source,
@@ -652,6 +664,7 @@ def media_save(request):
         if media_type == MediaTypes.THEATER.value:
             media_id = metadata["media_id"]
             theater_defaults["theater_forms"] = metadata["theater_forms"]
+            theater_defaults["theater_artwork"] = metadata.get("theater_artwork", {})
         item, _ = Item.objects.get_or_create(
             media_id=media_id,
             source=source,

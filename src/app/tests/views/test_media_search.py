@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import requests
@@ -108,6 +109,11 @@ class TheaterDiscoveryTests(TestCase):
 
     def source_response(self, url, params, **_kwargs):
         """Return fixed Action API responses at the external boundary."""
+        if url == "https://commons.wikimedia.org/w/api.php":
+            response = requests.Response()
+            response.status_code = 200
+            response._content = b'{"query":{"search":[]}}'
+            return response
         self.assertEqual(url, "https://www.wikidata.org/w/api.php")
         if params["action"] == "query":
             data = {
@@ -169,6 +175,224 @@ class TheaterDiscoveryTests(TestCase):
         self.assertEqual(
             Item.objects.get(media_type="theater").theater_forms, ["musical"]
         )
+
+    def test_work_linked_artwork_keeps_credit_through_tracking(self):
+        """An eligible Commons image carries its source and license to the library."""
+        self.entities["Q19320959"]["claims"]["P18"] = [
+            {"mainsnak": {"datavalue": {"value": "Stage photograph.jpg"}}},
+        ]
+        image = "https://thumb.wikimedia.org/wikipedia/commons/a/ab/Stage.jpg"
+        source_url = "https://commons.wikimedia.org/wiki/File:Stage_photograph.jpg"
+        commons = {
+            "query": {
+                "pages": {
+                    "123": {
+                        "pageid": 123,
+                        "title": "File:Stage photograph.jpg",
+                        "templates": [{"title": "Template:Cc-by-sa-4.0"}],
+                        "imageinfo": [
+                            {
+                                "url": image,
+                                "thumburl": image,
+                                "descriptionurl": source_url,
+                                "width": 600,
+                                "height": 900,
+                                "mime": "image/jpeg",
+                                "extmetadata": {
+                                    "Artist": {"value": "Example Photographer"},
+                                    "Credit": {"value": "Own work"},
+                                    "LicenseShortName": {"value": "CC BY-SA 4.0"},
+                                    "LicenseUrl": {
+                                        "value": "https://creativecommons.org/licenses/by-sa/4.0/"
+                                    },
+                                    "AttributionRequired": {"value": "true"},
+                                    "Restrictions": {"value": ""},
+                                },
+                            }
+                        ],
+                    }
+                }
+            },
+        }
+
+        def http_response(url, params, **kwargs):
+            if url != "https://commons.wikimedia.org/w/api.php":
+                return self.source_response(url, params, **kwargs)
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(commons).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=http_response):
+            search = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            )
+            self.assertContains(search, image)
+            self.assertContains(search, "Example Photographer")
+            self.assertContains(search, "CC BY-SA 4.0")
+            details = self.client.get(
+                reverse(
+                    "media_details",
+                    args=["wikidata", "theater", "Q19320959", "hamilton"],
+                )
+            )
+            self.assertContains(details, "Example Photographer")
+            self.assertContains(details, "CC BY-SA 4.0")
+            self.client.get(
+                reverse("lists_modal", args=["wikidata", "theater", "Q19320959"])
+            )
+            self.client.post(
+                reverse("media_save"),
+                {
+                    "media_id": "Q19320959",
+                    "media_type": "theater",
+                    "source": "wikidata",
+                    "status": "Completed",
+                },
+            )
+        work = Item.objects.get(media_id="Q19320959")
+        self.assertEqual(work.image, image)
+        self.assertEqual(work.theater_artwork["source_url"], source_url)
+        library = self.client.get(
+            reverse("medialist", args=[self.user.username, "theater"])
+        )
+        self.assertContains(library, "Example Photographer")
+        self.assertContains(library, "CC BY-SA 4.0")
+        cache.clear()
+
+        def commons_outage(url, params, **kwargs):
+            if "commons.wikimedia.org" in url:
+                raise requests.Timeout
+            return self.source_response(url, params, **kwargs)
+
+        with patch("app.providers.services.session.get", side_effect=commons_outage):
+            details = self.client.get(
+                reverse(
+                    "media_details",
+                    args=["wikidata", "theater", "Q19320959", "hamilton"],
+                )
+            )
+            self.assertContains(details, "Example Photographer")
+        work.refresh_from_db()
+        self.assertEqual(work.image, image)
+        self.assertEqual(work.theater_artwork["artist"], "Example Photographer")
+        for layout in ("table", "grid"):
+            response = self.client.get(
+                reverse("medialist", args=[self.user.username, "theater"]),
+                {"layout": layout},
+            )
+            self.assertContains(response, "Example Photographer")
+        metadata = commons["query"]["pages"]["123"]["imageinfo"][0]["extmetadata"]
+        for field, value in [
+            ("Restrictions", "personality rights"),
+            ("LicenseUrl", "https://creativecommons.org/licenses/by-nc/4.0/"),
+            ("Artist", ""),
+        ]:
+            with self.subTest(rejected=field):
+                original = metadata[field]["value"]
+                metadata[field]["value"] = value
+                cache.clear()
+                with patch(
+                    "app.providers.services.session.get", side_effect=http_response
+                ):
+                    response = self.client.get(
+                        reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                    )
+                self.assertContains(response, "Hamilton")
+                self.assertNotContains(response, image)
+                metadata[field]["value"] = original
+
+    def test_depiction_enrichment_requires_exact_work_and_safe_credits(self):
+        """Commons matching rejects other adaptations and warning-tagged files."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )
+        fixture["work"]["claims"].pop("P18")
+        self.entities["Q822850"] = fixture["work"]
+        self.search_ids = ["Q822850"]
+        page = fixture["commons"]["query"]["pages"]["123"]
+        info = page["imageinfo"][0]
+        info["extmetadata"]["GPSLatitude"] = {"value": 33.89}
+        info["extmetadata"]["ImageDescription"] = {
+            "value": "Theatrical performance of the work"
+        }
+        info["extmetadata"]["Artist"] = {
+            "value": '<a href="javascript:alert(1)">Test Photographer</a>'
+        }
+        depicted_work = "Q822850"
+
+        def source_response(url, params, **kwargs):
+            if "commons.wikimedia.org" not in url:
+                return self.source_response(url, params, **kwargs)
+            if params["action"] == "wbgetentities":
+                payload = {
+                    "entities": {
+                        "M123": {
+                            "statements": {
+                                "P180": [
+                                    {
+                                        "mainsnak": {
+                                            "datavalue": {
+                                                "value": {"id": depicted_work}
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            elif params.get("list") == "search":
+                payload = {
+                    "query": {"search": [{"pageid": 123, "title": page["title"]}]}
+                }
+            else:
+                payload = fixture["commons"]
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(payload).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+            )
+            self.assertContains(response, info["url"])
+            self.assertContains(response, "Test Photographer")
+            self.assertNotContains(response, "javascript:")
+            info["extmetadata"]["ImageDescription"]["value"] = (
+                "Performance of an opera based on Bernarda Alba"
+            )
+            cache.clear()
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+            )
+            self.assertNotContains(response, info["url"])
+            info["extmetadata"]["ImageDescription"]["value"] = (
+                "Set design for a performance of the work"
+            )
+            cache.clear()
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+            )
+            self.assertNotContains(response, info["url"])
+            info["extmetadata"]["ImageDescription"]["value"] = (
+                "Theatrical performance of the work"
+            )
+            depicted_work = "Q999"
+            cache.clear()
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+            )
+            self.assertNotContains(response, info["url"])
+            self.assertContains(response, "The House of Bernarda Alba")
+            depicted_work = "Q822850"
+            page["templates"].append({"title": "Template:Personality rights"})
+            cache.clear()
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+            )
+            self.assertNotContains(response, info["url"])
 
     def test_outage_preserves_local_attendance_and_manual_creation(self):
         """Provider downtime cannot prevent editing an existing attendance."""
