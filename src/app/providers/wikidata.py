@@ -22,6 +22,7 @@ FORM_IDS = {
     "Q13409536": "other",
 }
 WORK_IDS = [*FORM_IDS, "Q58483083", "Q58483088", "Q116476516", "Q7725634"]
+STAGE_WORK_IDS = set(WORK_IDS) - {"Q7725634"}
 GENRE_FORMS = {**FORM_IDS, "Q41425": "ballet", "Q123578591": "ballet"}
 EXCLUDED_TYPES = {
     "Q5",
@@ -46,7 +47,7 @@ CREATOR_ROLES = {
 }
 PAGE_SIZE = 20
 MAX_BATCHES = 3
-CLASSIFICATION_VERSION = 4
+CLASSIFICATION_VERSION = 5
 CLASS_DEPTH_LIMIT = 3
 CLASS_COUNT_LIMIT = 50
 TYPE_PROPERTIES = ("P31", "P7937", "P136")
@@ -192,15 +193,28 @@ def type_evidence(entity, property_id):
     return sorted({anchor for anchors in resolved if anchors for anchor in anchors})
 
 
+def has_type_conflict(entity):
+    """Allow only a direct theatrical-production type beside a direct stage work."""
+    direct_stage_work = STAGE_WORK_IDS.intersection(identifiers(entity, "P31"))
+    for property_id in TYPE_PROPERTIES:
+        direct_types = identifiers(entity, property_id)
+        resolved = entity.get("resolved_types", {}).get(
+            property_id, [{identifier} for identifier in direct_types]
+        )
+        for identifier, anchors in zip(direct_types, resolved, strict=True):
+            if property_id == "P31" and identifier == "Q7777570" and direct_stage_work:
+                continue
+            if anchors and EXCLUDED_TYPES.intersection(anchors):
+                return True
+    return False
+
+
 def forms(entity):
     """Require explicit work form evidence without guessing unresolved forms."""
     if "missing" in entity:
         return []
     types = type_evidence(entity, "P31")
-    if any(
-        EXCLUDED_TYPES.intersection(type_evidence(entity, property_id))
-        for property_id in TYPE_PROPERTIES
-    ):
+    if has_type_conflict(entity):
         return []
     if not set(WORK_IDS).intersection(types) and any(
         anchors is None for anchors in entity.get("resolved_types", {}).get("P31", [])
@@ -210,8 +224,7 @@ def forms(entity):
         return []
     evidence = type_evidence(entity, "P7937") + types
     classified = [FORM_IDS[value] for value in evidence if value in FORM_IDS]
-    stage_types = set(WORK_IDS) - {"Q7725634"}
-    if stage_types.intersection(types):
+    if STAGE_WORK_IDS.intersection(types):
         classified.extend(
             GENRE_FORMS[value]
             for value in type_evidence(entity, "P136")
@@ -399,7 +412,7 @@ def select_search_batch(params, selected, type_graph, *, optional=False):
 def search(query, page):
     """Filter a bounded candidate window before canonical result pagination."""
     literal = " ".join(query.split())[:200]
-    key = f"wikidata_search_v9_{literal}"
+    key = f"wikidata_search_v10_{literal}"
     cached = cache.get(key)
     if cached is None:
         escaped = literal.replace("\\", "\\\\").replace('"', '\\"')

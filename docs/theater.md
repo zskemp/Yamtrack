@@ -31,15 +31,25 @@ Search uses supported label/alias and statement filters, explicit Play, Musical,
 Opera and Ballet classification, and batched creator labels. Unknown forms are
 not guessed as Other. Manual creation remains available for unresolved works.
 Reviewed specific types include Italian opera, revue and pantomime. Named genre
-evidence is accepted only alongside recognized stage-work types. Direct production,
+evidence is accepted only alongside recognized stage-work types. Production-only,
 performance, radio/audio drama and television-play classifications override form
 claims. Broad work types alone never imply a named form or Other. Specific types
 can follow up to three P279 parent links, with at most 50 distinct classes shared
 across the search. Reviewed work/form/medium anchors stop traversal: some valid
 musical-work classes have production ancestors that must not override work-level
 identity. Cycles, missing/deprecated ancestry and over-budget paths remain
-unresolved; positive production or broadcast evidence wins. Explicit work types
+unresolved; production or broadcast conflicts generally win. Explicit work types
 remain usable when an unrelated secondary ancestry path is unresolved.
+One direct-type exception permits a theatrical-production P31 statement alongside
+a direct reviewed stage-work P31 statement. Literary work alone and subtype-only
+work evidence do not qualify for this exception. Production subclasses, production
+claims in form/genre fields, performing-arts productions, performances and screen
+media remain excluded. A producer-plus-cast-plus-director fingerprint excludes
+the record even with direct stage-work evidence. This admits mixed records such
+as Dear Evan Hansen without title-specific exceptions or merging identities.
+It favors discoverability but can admit incorrectly classified productions whose
+staging metadata is incomplete; it is not proof that every accepted entity is a
+work. Classification version 5 and search cache version 10 refresh older results.
 Class parents and source revisions are cached for one hour. Search and details use
 the same classification version. When statement-filtered discovery is exhausted
 with fewer than 20 eligible works and request budget remains, one literal

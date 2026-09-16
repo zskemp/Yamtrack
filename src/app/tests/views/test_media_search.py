@@ -218,6 +218,120 @@ class TheaterDiscoveryTests(TestCase):
         response._content = json.dumps(data).encode()
         return response
 
+    def test_mixed_stage_work_remains_discoverable_without_staging_fingerprint(self):
+        """A directly classified musical/work remains trackable with a mixed type."""
+        self.entities["Q20899421"] = {
+            "id": "Q20899421",
+            "lastrevid": 2532421479,
+            "labels": {"en": {"value": "Dear Evan Hansen"}},
+            "claims": {
+                "P31": [
+                    {
+                        "rank": "normal",
+                        "mainsnak": {"datavalue": {"value": {"id": identifier}}},
+                    }
+                    for identifier in ("Q58483083", "Q7777570")
+                ],
+                "P7937": [{"mainsnak": {"datavalue": {"value": {"id": "Q2743"}}}}],
+            },
+        }
+        self.search_ids = ["Q20899421", "Q999"]
+        response = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "Dear"}
+        )
+        self.assertEqual(
+            [work["item"]["media_id"] for work in response.context["data"]["results"]],
+            ["Q20899421"],
+        )
+        details = self.client.get(
+            reverse(
+                "media_details",
+                args=["wikidata", "theater", "Q20899421", "dear-evan-hansen"],
+            )
+        )
+        self.assertContains(details, "Musical")
+        self.client.post(
+            reverse("media_save"),
+            {
+                "media_id": "Q20899421",
+                "source": "wikidata",
+                "media_type": "theater",
+                "status": "Completed",
+                "venue": "Local Stage",
+            },
+        )
+        attendance = Theater.objects.get(user=self.user)
+        self.assertEqual(attendance.item.media_id, "Q20899421")
+        self.assertEqual(attendance.item.theater_forms, ["musical"])
+        self.assertEqual(attendance.venue, "Local Stage")
+
+    def test_mixed_work_exception_keeps_production_and_medium_guards(self):
+        """The direct mixed-type exception cannot promote known non-work records."""
+        self.search_ids = ["Q19320959"]
+        self.entities["Q99001"] = {
+            "id": "Q99001",
+            "lastrevid": 100,
+            "claims": {
+                "P279": [{"mainsnak": {"datavalue": {"value": {"id": "Q7777570"}}}}]
+            },
+        }
+        self.entities["Q99002"] = {
+            "id": "Q99002",
+            "lastrevid": 100,
+            "claims": {
+                "P279": [{"mainsnak": {"datavalue": {"value": {"id": "Q58483083"}}}}]
+            },
+        }
+        for types, extra_property in (
+            (["Q7777570"], None),
+            (["Q7725634", "Q7777570"], None),
+            (["Q99002", "Q7777570"], None),
+            (["Q58483083", "Q7777570"], "deprecated"),
+            (["Q58483083", "Q99001"], None),
+            (["Q58483083", "Q7777570", "Q11424"], None),
+            (["Q58483083", "Q7777570", "Q35140"], None),
+            (["Q58483083", "Q43099500"], None),
+            (["Q58483083", "Q7777570"], "P136"),
+            (["Q58483083", "Q7777570"], "P7937"),
+            (["Q58483083", "Q7777570"], "staging"),
+        ):
+            with self.subTest(types=types, extra_property=extra_property):
+                cache.clear()
+                claims = {
+                    "P31": [
+                        {"mainsnak": {"datavalue": {"value": {"id": identifier}}}}
+                        for identifier in types
+                    ],
+                    "P7937": [{"mainsnak": {"datavalue": {"value": {"id": "Q2743"}}}}],
+                }
+                if extra_property == "deprecated":
+                    claims["P31"][0]["rank"] = "deprecated"
+                elif extra_property == "staging":
+                    for property_id in ("P272", "P161", "P57"):
+                        claims[property_id] = [
+                            {"mainsnak": {"datavalue": {"value": {"id": "Q1646482"}}}}
+                        ]
+                elif extra_property:
+                    claims.setdefault(extra_property, []).append(
+                        {"mainsnak": {"datavalue": {"value": {"id": "Q7777570"}}}}
+                    )
+                self.entities["Q19320959"]["claims"] = claims
+                response = self.client.get(
+                    reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                )
+                self.assertEqual(response.context["data"]["total_results"], 0)
+                saved = self.client.post(
+                    reverse("media_save"),
+                    {
+                        "media_id": "Q19320959",
+                        "source": "wikidata",
+                        "media_type": "theater",
+                        "status": "Planning",
+                    },
+                )
+                self.assertEqual(saved.status_code, 500)
+                self.assertFalse(Theater.objects.filter(user=self.user).exists())
+
     def test_specific_source_types_resolve_without_crossing_work_boundaries(self):
         """Recognize specific stage works while excluding production subclasses."""
         classes = {

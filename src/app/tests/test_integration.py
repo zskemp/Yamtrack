@@ -411,7 +411,10 @@ class IntegrationTest(StaticLiveServerTestCase):
             "id": "Q98001",
             "labels": {"en": {"value": "Regional Opera"}},
             "claims": {
-                "P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q98002"}}}}]
+                "P31": [
+                    {"mainsnak": {"datavalue": {"value": {"id": identifier}}}}
+                    for identifier in ("Q98002", "Q58483083", "Q7777570")
+                ]
             },
         }
         work_type = {
