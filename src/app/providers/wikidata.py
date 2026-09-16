@@ -535,7 +535,7 @@ def select_search_batch(params, selected, type_graph, *, optional=False):
 def search(query, page):
     """Filter a bounded candidate window before canonical result pagination."""
     literal = " ".join(query.split())[:200]
-    key = f"wikidata_search_v14_{literal}"
+    key = f"wikidata_search_v15_{literal}"
     cached = cache.get(key)
     if cached is None:
         escaped = literal.replace("\\", "\\\\").replace('"', '\\"')
@@ -568,6 +568,17 @@ def search(query, page):
                 selected,
                 type_graph,
                 optional=bool(selected),
+            )
+            incomplete = continuation is None
+            _batch += 1
+        variant = re.match(r"(?i)^the (\S.*)$", literal)
+        if variant and not selected and continuation == {} and _batch < MAX_BATCHES - 1:
+            shortened = variant[1].replace("\\", "\\\\").replace('"', '\\"')
+            continuation = select_search_batch(
+                {**params, "srsearch": f'inlabel:"{shortened}@*"'},
+                selected,
+                type_graph,
+                optional=True,
             )
             incomplete = continuation is None
         results = hydrate(list(selected.values()))

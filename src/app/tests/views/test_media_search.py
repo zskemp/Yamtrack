@@ -2003,6 +2003,198 @@ class TheaterDiscoveryTests(TestCase):
             TheaterRedirect.objects.get(alias_id="Q94002").canonical_id, "Q999"
         )
 
+    def test_leading_article_fallback_finds_trackable_work_without_merging(self):
+        """An empty literal search can use one spare batch for a title variant."""
+        self.entities["Q30888980"] = {
+            "id": "Q30888980",
+            "labels": {"en": {"value": "Lehman Trilogy"}},
+            "claims": {
+                "P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q7725634"}}}}],
+                "P7937": [{"mainsnak": {"datavalue": {"value": {"id": "Q25379"}}}}],
+            },
+        }
+        calls = []
+
+        def source_response(url, params, **kwargs):
+            if params.get("list") != "search":
+                return self.source_response(url, params, **kwargs)
+            calls.append(params["srsearch"])
+            hits = (
+                ["Q30888980", "Q999"]
+                if params["srsearch"] == 'inlabel:"Lehman Trilogy@*"'
+                else []
+            )
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(
+                {"query": {"search": [{"title": identifier} for identifier in hits]}}
+            ).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"),
+                {"media_type": "theater", "q": "  tHe   Lehman Trilogy  "},
+            )
+            results = response.context["data"]["results"]
+            self.assertEqual(
+                [result["item"]["media_id"] for result in results], ["Q30888980"]
+            )
+            self.assertEqual(len(calls), 3)
+            self.assertTrue(calls[0].startswith('inlabel:"tHe Lehman Trilogy@*"'))
+            self.assertEqual(
+                calls[1:],
+                ['inlabel:"tHe Lehman Trilogy@*"', 'inlabel:"Lehman Trilogy@*"'],
+            )
+            self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "tHe Lehman Trilogy"}
+            )
+            self.assertEqual(len(calls), 3)
+            cache.clear()
+            calls.clear()
+            shorter = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Lehman Trilogy"}
+            )
+            self.assertEqual(
+                [
+                    (result["item"]["media_id"], result["item"]["title"])
+                    for result in shorter.context["data"]["results"]
+                ],
+                [("Q30888980", "Lehman Trilogy")],
+            )
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(
+                all(call.startswith('inlabel:"Lehman Trilogy@*"') for call in calls)
+            )
+            self.client.post(
+                reverse("media_save"),
+                {
+                    "media_id": "Q30888980",
+                    "source": "wikidata",
+                    "media_type": "theater",
+                    "status": "Planning",
+                    "notes": "Found by ordinary title",
+                },
+            )
+            details = self.client.get(
+                reverse(
+                    "media_details",
+                    args=["wikidata", "theater", "Q30888980", "lehman-trilogy"],
+                )
+            )
+            self.assertContains(details, "Found by ordinary title")
+            self.assertFalse(TheaterRedirect.objects.exists())
+
+    def test_article_fallback_respects_literal_results_and_remaining_budget(self):
+        """Do not rewrite useful, unfinished, exhausted or non-article queries."""
+        cases = (
+            ("The Stage", "found", 2, 1),
+            ("The Stage", "spent", 3, 0),
+            ("The Stage", "unfinished", 2, 0),
+            ("The", "empty", 2, 0),
+            ("Theatre", "empty", 2, 0),
+            ("Stage The", "empty", 2, 0),
+            ("A Stage", "empty", 2, 0),
+            ("The The Stage", "variant", 3, 1),
+        )
+        for query, mode, expected_calls, expected_results in cases:
+            with self.subTest(query=query, mode=mode):
+                cache.clear()
+                calls = []
+
+                def source_response(
+                    url,
+                    params,
+                    *,
+                    calls=calls,
+                    mode=mode,
+                    final_batch=expected_calls,
+                    **kwargs,
+                ):
+                    if params.get("list") != "search":
+                        return self.source_response(url, params, **kwargs)
+                    calls.append(params["srsearch"])
+                    hits = (
+                        ["Q19320959"]
+                        if mode == "found"
+                        or (mode == "variant" and len(calls) == final_batch)
+                        else []
+                    )
+                    payload = {
+                        "query": {
+                            "search": [{"title": identifier} for identifier in hits]
+                        }
+                    }
+                    if (mode == "spent" and len(calls) < final_batch) or (
+                        mode == "unfinished" and len(calls) == final_batch
+                    ):
+                        payload["continue"] = {"sroffset": len(calls) * 50}
+                    response = requests.Response()
+                    response.status_code = 200
+                    response._content = json.dumps(payload).encode()
+                    return response
+
+                with patch(
+                    "app.providers.services.session.get", side_effect=source_response
+                ):
+                    response = self.client.get(
+                        reverse("search"), {"media_type": "theater", "q": query}
+                    )
+                self.assertEqual(len(calls), expected_calls)
+                self.assertEqual(
+                    len(response.context["data"]["results"]), expected_results
+                )
+                if mode == "variant":
+                    self.assertEqual(calls[-1], 'inlabel:"The Stage@*"')
+
+    def test_article_fallback_escapes_titles_and_retries_failed_lookup(self):
+        """Failure remains limited and uncached; variant syntax stays literal."""
+        calls = []
+        available = False
+        continued = False
+
+        def source_response(url, params, **kwargs):
+            if params.get("list") != "search":
+                return self.source_response(url, params, **kwargs)
+            calls.append(params["srsearch"])
+            variant = params["srsearch"].startswith('inlabel:"Stage ')
+            if variant and not available:
+                raise requests.Timeout
+            hits = ["Q19320959", "Q998", "Q999"] if variant else []
+            payload = {
+                "query": {"search": [{"title": identifier} for identifier in hits]}
+            }
+            if variant and continued:
+                payload["continue"] = {"sroffset": 50}
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(payload).encode()
+            return response
+
+        query = 'The Stage "Name" \\'
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": query}
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.context["data"]["limited"])
+            self.assertEqual(response.context["data"]["results"], [])
+            self.assertEqual(calls[-1], 'inlabel:"Stage \\"Name\\" \\\\@*"')
+            available = True
+            continued = True
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": query}
+            )
+            self.assertEqual(len(calls), 6)
+            self.assertTrue(response.context["data"]["limited"])
+            self.assertEqual(
+                [
+                    result["item"]["media_id"]
+                    for result in response.context["data"]["results"]
+                ],
+                ["Q19320959"],
+            )
+
     def test_label_backfill_respects_full_pages_and_search_budget(self):
         """Backfill never adds a batch after a full page or three filtered batches."""
         for number in range(20):

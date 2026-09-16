@@ -52,7 +52,7 @@ staging metadata is incomplete; it is not proof that every accepted entity is a
 work. Explicit English descriptions of venues or staged performances and a combined
 director/translator/based-on staging pattern also exclude records. These checks
 do not infer identity from titles or guarantee accurate classification when source
-evidence is incomplete. Classification version 7 and search cache version 14
+evidence is incomplete. Classification version 7 and search cache version 15
 refresh older results.
 
 Genre ancestry is not always work-medium evidence: jukebox musical, for example,
@@ -77,6 +77,16 @@ works with the limited-search notice and does not cache the partial result.
 Identity conflicts still fail, and failed searches without usable results retain
 normal error behavior. The search
 limit notice also appears when the class-lookup budget is exhausted.
+
+If the literal search is exhausted with no eligible work, a query beginning with
+the English word "The" can use one remaining batch for the title without that
+leading word. Matching is case-insensitive for "The" only; normal whitespace
+normalization and literal escaping still apply. The same classifier, shared class
+budget and three-batch/150-candidate ceiling apply. Existing useful results are
+never replaced, unfinished searches are not rewritten, and no further words or
+articles are stripped. A failed variant lookup returns a limited, uncached result
+so a later request can retry. This is query fallback, not evidence that two work
+records are equivalent; provider titles and canonical identities remain unchanged.
 
 Search inspects at most 150 provider candidates, preserves provider order and
 deduplicates actual redirect targets before pagination. A visible notice identifies
