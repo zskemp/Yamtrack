@@ -1855,6 +1855,120 @@ class TheaterDiscoveryTests(TestCase):
         self.assertEqual(Item.objects.filter(media_type="theater").count(), 4)
         self.assertFalse(TheaterRedirect.objects.exists())
 
+    def test_us_public_domain_assessment_preserves_jurisdiction_and_source(self):
+        """An explicit US assessment retains source context through offline restore."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )
+        self.entities["Q822850"] = fixture["work"]
+        self.search_ids = ["Q822850"]
+        page = fixture["commons"]["query"]["pages"]["123"]
+        page["templates"] = [{"title": "Template:PD-US"}]
+        metadata = page["imageinfo"][0]["extmetadata"]
+        metadata.pop("LicenseUrl")
+        metadata.update(
+            LicenseShortName={"value": "Public domain"},
+            Copyrighted={"value": "False"},
+            Artist={"value": "Source Publisher"},
+            Credit={"value": "Theatre Magazine, January 1919, pages 178-179"},
+        )
+
+        def source_response(url, params, **kwargs):
+            if "commons.wikimedia.org" not in url:
+                return self.source_response(url, params, **kwargs)
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(
+                {"query": {"search": []}}
+                if params.get("list") == "search"
+                else fixture["commons"]
+            ).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+            )
+            self.assertContains(response, page["imageinfo"][0]["url"])
+            self.assertContains(response, "outside the United States")
+            self.assertContains(response, "Theatre Magazine, January 1919")
+            self._assert_us_assessment_rejections(page, source_response)
+            self.client.post(
+                reverse("media_save"),
+                {
+                    "media_id": "Q822850",
+                    "source": "wikidata",
+                    "media_type": "theater",
+                    "status": "Completed",
+                },
+            )
+        content = b"".join(self.client.get(reverse("export_csv")).streaming_content)
+        Item.objects.get(media_id="Q822850").delete()
+        with patch(
+            "app.providers.services.session.get",
+            side_effect=AssertionError("Restore must stay offline"),
+        ):
+            self.client.post(
+                reverse("import_yamtrack"),
+                {
+                    "mode": "new",
+                    "yamtrack_csv": SimpleUploadedFile("us-artwork.csv", content),
+                },
+            )
+        restored = Item.objects.get(media_id="Q822850")
+        self.assertEqual(restored.image, page["imageinfo"][0]["url"])
+        self.assertEqual(restored.theater_artwork["basis"], "pd-us")
+        self.assertIn(
+            "outside the United States", restored.theater_artwork["basis_notice"]
+        )
+        self.assertEqual(
+            restored.theater_artwork["credit"], metadata["Credit"]["value"]
+        )
+
+    def _assert_us_assessment_rejections(self, page, source_response):
+        """Keep incomplete and disputed US assessments out of search artwork."""
+        original = json.loads(json.dumps(page))
+        for field, value in (
+            ("Artist", ""),
+            ("Artist", "Unknown author"),
+            ("Credit", "Theatre Magazine, undated"),
+            ("Credit", ""),
+            ("Copyrighted", "True"),
+            ("Restrictions", "unresolved copyright"),
+            ("templates", [{"title": "Template:PD-old"}]),
+            (
+                "templates",
+                [
+                    {"title": "Template:PD-US"},
+                    {"title": "Template:Copyright violation"},
+                ],
+            ),
+        ):
+            with self.subTest(field=field, value=value):
+                page.clear()
+                page.update(json.loads(json.dumps(original)))
+                if field == "templates":
+                    page[field] = value
+                else:
+                    page["imageinfo"][0]["extmetadata"][field] = {"value": value}
+                page["imageinfo"][0]["extmetadata"]["DateTimeOriginal"] = {
+                    "value": "1919-01-01"
+                }
+                cache.clear()
+                with patch(
+                    "app.providers.services.session.get", side_effect=source_response
+                ):
+                    response = self.client.get(
+                        reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                    )
+                self.assertContains(response, "The House of Bernarda Alba")
+                self.assertFalse(
+                    response.context["data"]["results"][0]["item"]["theater_artwork"]
+                )
+        page.clear()
+        page.update(original)
+        cache.clear()
+
     def test_public_domain_logo_and_standard_notices_remain_usable(self):
         """Published public-domain bases and standard notices do not hide images."""
         fixture = json.loads(

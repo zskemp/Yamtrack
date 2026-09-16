@@ -199,16 +199,32 @@ class TheaterExportRestoreTest(TestCase):
         content = b"".join(self.client.get(reverse("export_csv")).streaming_content)
         rows = list(csv.DictReader(StringIO(content.decode())))
         artwork = json.loads(rows[0]["theater_artwork"])
-        for policy, notices in (
-            (6, ""),
-            (8, artwork["notices"]),
-            (9, artwork["notices"]),
+        for policy, notices, supports_cc in (
+            (6, "", True),
+            (8, artwork["notices"], True),
+            (9, artwork["notices"], True),
+            (10, artwork["notices"], True),
+            (10, artwork["notices"], False),
         ):
-            with self.subTest(policy=policy):
+            with self.subTest(policy=policy, supports_cc=supports_cc):
                 legacy_artwork = {
                     **artwork,
                     "policy": policy,
                     "notices": notices,
+                    "source_tags": [
+                        *[
+                            tag
+                            for tag in artwork["source_tags"]
+                            if supports_cc or tag != "template:cc-by-sa-4.0"
+                        ],
+                        "template:pd-us",
+                    ],
+                    "credit": "Theatre Magazine, January 1919",
+                    "rights": {
+                        **artwork["rights"],
+                        "Copyrighted": "False",
+                        "Credit": "Theatre Magazine, January 1919",
+                    },
                 }
                 rows[0]["theater_artwork"] = json.dumps(legacy_artwork)
                 legacy = StringIO()
@@ -230,10 +246,18 @@ class TheaterExportRestoreTest(TestCase):
                         },
                     )
                 restored = Item.objects.get(media_id="Q822850")
+                if not supports_cc:
+                    self.assertEqual(restored.theater_artwork, {})
+                    self.assertNotEqual(restored.image, artwork["image"])
+                    continue
                 self.assertEqual(restored.image, artwork["image"])
                 self.assertIn("PD-Art", restored.theater_artwork["notices"])
                 self.assertEqual(
                     restored.theater_artwork["artist"], "Test Photographer"
+                )
+                self.assertEqual(restored.theater_artwork["license"], "CC BY-SA 4.0")
+                self.assertEqual(
+                    restored.theater_artwork["credit"], "Theatre Magazine, January 1919"
                 )
 
     def test_provider_artwork_round_trip_offline(self):

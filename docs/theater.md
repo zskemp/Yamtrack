@@ -138,6 +138,20 @@ license-template evidence and supplied artist attribution. Explicit PD-textlogo
 and PD-old-auto/70/100-expired bases are supported when Commons also identifies
 the file as not copyrighted; the named basis and jurisdiction caveats are retained.
 No generic "Public domain" string is treated as sufficient evidence.
+The explicit Commons PD-US tag is also accepted with a named creator and a
+publication-source credit containing a year. This is a metadata-completeness
+screen, not a determination of publication date or copyright expiration. It does
+not use upload timestamps or creation dates to infer public-domain status. The
+source's general US assessment does not identify which legal basis applies; its
+notice warns that copyright may remain outside the United States, especially
+where the rule of the shorter term does not apply. Creator and publication credit
+remain visible and portable, along with this notice. Missing context, generic
+PD-old alone and actual copyright/permission warnings remain insufficient.
+Restore validates the grant recorded in an export rather than replacing it with
+today's preferred basis. A previously supported CC grant remains valid when its
+source also lists PD-US, provided its own grant evidence and full notices remain
+intact. Merely retaining a CC label without its source template is insufficient.
+See the [Commons PD-US documentation](https://commons.wikimedia.org/wiki/Template:PD-US).
 The specifically asserted PD-US-dust-jacket basis is also supported: it concerns
 the jacket's US notice-formality status, not the book text or worldwide rights.
 Supplied permission text and PD-Art reproduction caveats remain visible/exported.
@@ -175,7 +189,7 @@ retryable; complete negative scans cache the original selection for one hour.
 Malformed search hits or MediaInfo statement envelopes are unavailable evidence,
 not completed negative scans; they preserve the direct image and permit retry.
 Category discovery remains an absence-only fallback, not an upgrade source.
-Selection caches refresh with policy version 10; valid version-8/9 exports remain
+Selection caches refresh with policy version 11; valid version-8/9/10 exports remain
 restorable without a provider request.
 
 Images use returned thumbnails without cropping. Image credit controls accompany

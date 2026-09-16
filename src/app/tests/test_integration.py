@@ -335,6 +335,15 @@ class IntegrationTest(StaticLiveServerTestCase):
             }
         )
         image_info = fixture["commons"]["query"]["pages"]["123"]["imageinfo"][0]
+        fixture["commons"]["query"]["pages"]["123"]["templates"] = [
+            {"title": "Template:PD-US"}
+        ]
+        image_info["extmetadata"].update(
+            LicenseUrl={"value": ""},
+            LicenseShortName={"value": "Public domain"},
+            Copyrighted={"value": "False"},
+            Credit={"value": "Theatre Magazine, January 1919, pages 178-179"},
+        )
         image_info["extmetadata"]["ImageDescription"] = {
             "value": (
                 "Illustration of The House of Bernarda Alba, "
@@ -428,7 +437,15 @@ class IntegrationTest(StaticLiveServerTestCase):
                     self.page.goto(f"{self.live_server_url}/test/theater")
                     self.page.get_by_text("Image credit", exact=True).click()
                     expect(
-                        self.page.get_by_role("link", name="CC BY-SA 4.0", exact=True)
+                        self.page.get_by_role("link", name="Public domain", exact=True)
+                    ).to_be_visible()
+                    expect(
+                        self.page.get_by_text("outside the United States", exact=False)
+                    ).to_be_visible()
+                    expect(
+                        self.page.get_by_text(
+                            "Theatre Magazine, January 1919", exact=False
+                        )
                     ).to_be_visible()
                     self.assertTrue(
                         self.page.evaluate(

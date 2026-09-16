@@ -23,7 +23,7 @@ from app.providers import services
 
 logger = logging.getLogger(__name__)
 BASE_URL = "https://commons.wikimedia.org/w/api.php"
-POLICY_VERSION = 10
+POLICY_VERSION = 11
 LEGACY_POLICY_VERSION = 3
 PD_ART_NOTICE_POLICY_VERSION = 8
 MIN_IMAGE_DIMENSION = 200
@@ -120,6 +120,14 @@ PUBLIC_DOMAIN_BASES = {
         "Commons identifies an author deceased over 70 years ago and expired "
         "United States copyright; longer terms may apply elsewhere."
     ),
+    "pd-us": (
+        "Commons identifies this US work as public domain in the United States. "
+        "The general PD-US tag does not specify whether expiration, lack of notice "
+        "or lack of renewal is the reason. It may remain copyrighted outside the "
+        "United States, especially where the rule of the shorter term does not "
+        "apply. Retain the supplied creator and publication-source information. "
+        "https://commons.wikimedia.org/wiki/Template:PD-US"
+    ),
 }
 STANDARD_RESTRICTIONS = {
     "personality",
@@ -202,6 +210,15 @@ def reuse_grant(value, tags):
     if value.get("Copyrighted", "").casefold() == "false":
         for template, notice in PUBLIC_DOMAIN_BASES.items():
             if f"template:{template}" in tags:
+                if template == "pd-us" and (
+                    not value.get("Artist", "").strip()
+                    or value["Artist"].strip().casefold()
+                    in {"unknown", "unknown author", "anonymous"}
+                    or not re.search(
+                        r"\b(?:1[5-9][0-9]{2}|20[0-9]{2})\b", value.get("Credit", "")
+                    )
+                ):
+                    continue
                 return {
                     "license": "Public domain",
                     "license_url": f"https://commons.wikimedia.org/wiki/Template:{template}",
@@ -460,6 +477,7 @@ def complete_credit(artwork):
         7,
         8,
         9,
+        10,
         POLICY_VERSION,
     }:
         return False
@@ -508,7 +526,12 @@ def consistent_reuse_record(artwork):
         return False
     if not all(isinstance(value, str) for value in rights.values()):
         return False
-    grant = reuse_grant(rights, tags)
+    other_bases = {
+        f"template:{basis}"
+        for basis in PUBLIC_DOMAIN_BASES
+        if basis != artwork.get("basis")
+    }
+    grant = reuse_grant(rights, [tag for tag in tags if tag not in other_bases])
     return (
         grant is not None
         and all(artwork.get(key) == value for key, value in grant.items())
