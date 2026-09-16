@@ -49,7 +49,11 @@ the record even with direct stage-work evidence. This admits mixed records such
 as Dear Evan Hansen without title-specific exceptions or merging identities.
 It favors discoverability but can admit incorrectly classified productions whose
 staging metadata is incomplete; it is not proof that every accepted entity is a
-work. Classification version 5 and search cache version 10 refresh older results.
+work. Explicit English descriptions of venues or staged performances and a combined
+director/translator/based-on staging pattern also exclude records. These checks
+do not infer identity from titles or guarantee accurate classification when source
+evidence is incomplete. Classification version 6 and search cache version 13
+refresh older results.
 Class parents and source revisions are cached for one hour. Search and details use
 the same classification version. When statement-filtered discovery is exhausted
 with fewer than 20 eligible works and request budget remains, one literal
@@ -79,9 +83,12 @@ for one hour, including confirmed absence. Remaining works keep their QID and st
 visible; a later request can use cached labels to reach further missing labels.
 Failures and malformed/mismatched entity records do not block tracking, and
 incomplete label enrichment prevents caching the final search/detail response.
+Classification fetches request only claims and revision information; creator and
+language fetches request labels and aliases. Full work records retain the claims,
+descriptions and sitelinks needed for discovery and artwork.
 Only labels are read from this fallback; it cannot change claims or establish
-redirects. Label metadata version 1 and search cache version 11 refresh old
-QID-only results.
+redirects. Label metadata version 1 retains compatibility with source-language
+labels recovered by earlier searches.
 
 ## Artwork
 
@@ -93,11 +100,12 @@ Wikidata sitelinks identify articles; the returned article must independently
 report the same QID and not be a disambiguation page. An article association is
 source evidence, not proof that every lead image is the ideal poster.
 
-Displayed works are batched by site, trying English then up to two other available
-sites from French, German, Spanish, Italian and Dutch. One article request and one
-file request per site obtain PageImages (`pilicense=any`) and current imageinfo.
+Displayed works are batched by site, trying up to three available articles in the
+order English, French, German, Spanish, Italian and Dutch. Each site uses one
+article request and, only when filenames are found, one file request to obtain
+PageImages (`pilicense=any`) and current imageinfo.
 At most twelve calls are scheduled within twenty seconds, each waiting at most
-eight seconds. Commons fallback retains its own existing page budget. These are
+eight seconds. Commons fallback has a separate page budget described below. These are
 scheduling/network-wait bounds, not a guarantee against transport throttling.
 Only returned Wikimedia still-image thumbnails up to 300 pixels wide are used;
 no higher-resolution image or older upload is fetched. Files actually hosted by
@@ -107,7 +115,7 @@ not substituted solely because a Commons filename matches.
 Complete selections and confirmed absence cache for one hour, keyed by work
 revision and sitelinks. Incomplete per-work responses remain retryable without
 discarding successfully processed neighbors. Missing articles/images or rejected
-media fall back to the existing Commons resolver. Temporary Wikipedia failures
+media fall back to directly Wikidata-linked Commons files. Temporary Wikipedia failures
 preserve saved images/credits and prevent failed refreshes from persisting.
 Explicit metadata sync invalidates the Wikipedia selection cache.
 
@@ -125,55 +133,48 @@ metadata and notices; altered records omit imagery without losing attendance.
 Known canonical redirects retain the original artwork evidence subject. Restore
 does not establish new global equivalence or independently authenticate an export.
 
-### Commons Fallback
+### Direct-File Commons Fallback
 
-Commons images are eligible through a work's direct P18 image/P154 logo claim or verified
-exact-work P180 depiction statements. Enrichment runs only for the displayed
-page, not every candidate. Each work examines up to five direct files and, if
-none qualify, up to twelve exact-depiction candidates. After this initial coverage
-pass across the displayed page, remaining budget can inspect that same depiction
-window for works with a qualified direct image but no poster. Only a qualified
-depiction poster can replace an existing direct non-poster image. Direct posters
-skip this optional lookup. Qualified direct images are reused without fetching
-their metadata again; each selection retains its own matching evidence and credit.
-Requests are serial and reuse the
-provider transport. Successful artwork selections are cached for one hour;
-Commons rate-limit responses impose a shared retry cooldown.
-File metadata is fetched in groups of three with at most one continuation request
-per group. Rights checks run only after that group's metadata is complete; a
-revision change or unfinished continuation is unavailable data, not a confirmed
-rejection. A later optional batch failure does not discard an image already
-qualified from a completed batch. Partial scans are not cached, allowing a later
-retry to select a preferred image. No recursive image search is performed.
-Image-history continuation is not rights metadata: only the current upload is
-used. Template/category continuation retains current file information rather than
-following older uploads.
+When Wikipedia supplies no accepted image, Commons resolves filenames already
+identified by the work's direct P18 image/P154 logo claims, at most five per work.
+Only displayed results receive artwork enrichment. There is no exploratory P180
+depiction search, P373 category discovery, or additional search to upgrade a photo
+to a poster. Missing filenames cause no Commons request.
 
-When direct images and exact depictions yield no usable candidate, the first
-work-supplied Commons category may provide up to ten direct files. The category
-must link back to the exact Wikidata work. An accepted file must independently
-describe an illustration, photograph, poster, scene or performance of the exact
-work title and theater form by a known creator. This initial description grammar
-supports English labels/aliases; short creator names and fuzzy matching are not
-used. Wrong forms, negated descriptions, unrelated portraits and rights failures
-are rejected. Category ID/revision and the matching evidence are retained with
-the image and survive own-data export/restore. Category membership alone never
-proves a match. This fallback shares the existing page budget below.
-Malformed category responses are unavailable data, not a reason to fail the work
-search. A failed exact-depiction lookup can fall back to the category while budget
-remains. Restoring category artwork requires its category identity/revision and
-internally consistent description, creator, form and original work evidence.
-Displayed-page enrichment shares a 24-request Commons budget and stops scheduling
-new artwork calls after 20 seconds. Each HTTP wait is limited to at most eight
-seconds or the remaining budget, whichever is smaller. Cached qualified artwork
-does not consume calls. These are scheduling and network-wait limits, not a hard
-wall-clock guarantee covering DNS, shared throttling, retries or Wikidata discovery.
-Budget exhaustion retains eligible results and any already-qualified artwork;
-later detail requests get a fresh budget. Other providers retain their default
-HTTP timeout.
-Transient failures preserve already-saved artwork and credit rather than replacing
-them with a placeholder. Explicit metadata sync invalidates the work's Commons
-selection and refuses to overwrite artwork when that lookup is unavailable.
+Uncached filenames are deduplicated across the displayed page and fetched lazily
+in groups of at most three. API-provided normalization and redirects associate
+metadata with the requested file; selection and work identity remain independent
+for each work. Wikipedia successes and valid cached Commons selections do not
+enter these batches. A page with only one uncached work retains per-work lookup.
+Successful selections are cached for one hour.
+
+File metadata permits one continuation request per group. Rights checks run only
+after complete category/template metadata has arrived; changed revisions or an
+unfinished continuation are unavailable data, not confirmed rejection. Only the
+current upload is used; image-history continuation is not followed.
+
+A failed shared batch is retried individually, once per file. Recovered candidates
+remain usable even when another candidate in that work fails; the result is
+marked partial and not cached as complete. Commons 429/503 responses impose a
+shared cooldown and stop further network recovery. Requests reuse the existing
+provider transport and its low-level behavior.
+
+Search pages have a shared **48-call / 30-second Commons scheduling budget**.
+Each request timeout is at most eight seconds and bounded by remaining time and
+the configured timeout. Shared batches require at least eight calls and sixteen
+seconds of headroom; otherwise the current file is fetched independently. This
+reduces risk from unrelated files near exhaustion but does not guarantee recovery
+through outages. Detail lookups retain a fresh **24-call / 20-second** budget.
+These are not hard end-to-end response-time guarantees covering all transport,
+parsing, Wikidata and Wikipedia work. Budget exhaustion never hides work results.
+
+Source failures preserve saved images and credits. A refresh with no direct file
+does not erase saved artwork. Earlier discovery-derived artwork remains preserved
+against a direct-file replacement, while a valid Wikipedia image may replace it.
+Explicit metadata sync invalidates source selection caches and refuses unavailable
+refreshes. Offline restore continues to validate older depiction/category evidence;
+retiring live discovery does not remove its export compatibility. Category records
+still require internally consistent work, creator, form and category evidence.
 
 Accepted grants are CC0 1.0, CC BY 2.0/4.0 and CC BY-SA 3.0/4.0, with matching
 license-template evidence and supplied artist attribution. Explicit PD-textlogo
@@ -215,24 +216,23 @@ Expiry claims with missing-date warnings are rejected. Migrated-license files
 require the actual rendered file-specific disclaimer, not just a generic license
 template link. Older CC-only exports retain their original grant/author checks;
 new public-domain exports require complete, consistent basis and notice evidence.
-Exact depiction candidates also require affirmative performance/illustration descriptions;
-advertisements not explicitly described as work posters, audiences, adaptations
-and isolated set designs are excluded.
+For direct files, advertisements not explicitly described as work posters,
+audiences, adaptations and isolated set designs are excluded.
 
-Within each discovered candidate set, affirmative English "poster for/of"
+Within each direct candidate set, affirmative English "poster for/of"
 descriptions take priority over file/object-title poster hints; title hints apply
 only when a description is absent. Remaining ties prefer a 2:3 portrait ratio,
 then stable file ID. Incidental poster mentions do not establish poster preference.
 An explicitly described work poster may mention its advertisement purpose, but
-wrong-medium/adaptation and rights checks still apply. Poster upgrades share the
-same page-wide budget and never take calls ahead of initial image coverage.
-Upgrade failures preserve the qualified direct image and leave the upgrade
-retryable; complete negative scans cache the original selection for one hour.
-Malformed search hits or MediaInfo statement envelopes are unavailable evidence,
-not completed negative scans; they preserve the direct image and permit retry.
-Category discovery remains an absence-only fallback, not an upgrade source.
-Selection caches refresh with policy version 11; valid version-8/9/10 exports remain
-restorable without a provider request.
+wrong-medium/adaptation and rights checks still apply. No separate poster search
+is made. Selection caches use policy version 12; earlier supported policies,
+including version 11, remain restorable without a provider request.
+
+Both source paths reject explicit creator headshots and person-only photographs
+corroborated by a matching person-role category, object name and location-style
+description. Explicit performance context and named-role portraits remain usable.
+These are bounded metadata checks, not exhaustive image understanding or new
+remote lookups. A rejected image leaves the work discoverable.
 
 Images use returned thumbnails without cropping. Image credit controls accompany
 search, details, library, home, history and list covers, preserving title, artist,
@@ -261,6 +261,9 @@ chain consistently. Qualified artwork can move to an imageless canonical work,
 with its original evidence subject retained separately from its current work ID.
 Redirect transactions are serialized on PostgreSQL and SQLite; concurrent target
 creation during rename is retried as reconciliation rather than data deletion.
+If a provider response points to an intermediate ID that already redirects locally,
+detail and save requests resolve terminal-work metadata before returning it. This
+prevents a retired intermediate identity from being recreated by a new attendance.
 
 Own-data imports resolve aliases already verified by this installation without
 provider access. Re-export uses canonical IDs. Uploaded files cannot assert new
@@ -279,17 +282,17 @@ Only actual Wikidata redirects establish canonical identity. Same-title works,
 adaptations and ambiguous ballet variants remain separate; derivative-work claims
 do not establish equivalence. Saved identities are reconciled only for observed
 redirects, never by title, composer or image availability. Verified non-redirect
-duplicate/grouping mappings and fresh-install legacy-alias resolution remain open
-acceptance gates.
+duplicate/grouping mappings and automatic fresh-install alias resolution during
+offline restore are explicitly deferred from the approved redirects-only release.
 
 Provider classification uses reviewed anchors and bounded subclass resolution,
 not an unrestricted ontology traversal. Some valid works with incomplete classifications
 will require manual entry. Production/granularity conflicts require further review.
 
-For ballet, ordinary versions and re-choreographies should share a work when the
-underlying relationship is verified; clearly authored reinventions remain distinct
-adaptations. Derivation alone does not prove equivalence. Current source data does
-not provide a reliable general mapping for these non-redirect grouping cases.
+Broader grouping of ordinary ballet versions and re-choreographies is deferred;
+clearly authored reinventions remain distinct adaptations. Derivation alone does
+not prove equivalence. Current source data does not provide a reliable general
+mapping for these non-redirect grouping cases.
 In particular, a version/edition property is not by itself a choreography mapping:
 observed P629 ballet-parent records include libretto editions. The named Raisin
 staging conflict and the Swan Lake/Nutcracker variants have request regressions

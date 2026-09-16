@@ -474,6 +474,9 @@ def theater(media_id):
             Sources.WIKIDATA.value, media_id, "theater work with a supported form"
         )
     theater_identity.record_redirect(media_id, entity)
+    terminal_id = theater_identity.canonical_id(entity["id"])
+    if terminal_id != entity["id"]:
+        return theater(terminal_id)
     work = hydrate([entity])[0]
     article_artwork = wikipedia.artworks([work])[work["media_id"]]
     with commons.request_budget():

@@ -3389,6 +3389,104 @@ class TheaterDiscoveryTests(TestCase):
         self.assertTrue(Movie.objects.filter(pk=unexpected.pk).exists())
         self.assertFalse(TheaterRedirect.objects.filter(alias_id="Q998").exists())
 
+    def test_intermediate_redirect_returns_terminal_metadata_before_saving(self):
+        """A provider's intermediate redirect cannot recreate a retired work ID."""
+        TheaterRedirect.objects.create(
+            alias_id="Q19320959", canonical_id="Q997", revision=100
+        )
+        self.entities["Q997"] = {
+            **self.entities["Q19320959"],
+            "id": "Q997",
+            "labels": {"en": {"value": "Canonical Hamilton"}},
+        }
+        old = Item.objects.create(
+            media_id="Q998",
+            source="wikidata",
+            media_type="theater",
+            title="Saved Hamilton",
+            image="",
+            theater_forms=["musical"],
+        )
+        first = Theater.objects.create(item=old, user=self.user, notes="First visit")
+        details = self.client.get(
+            reverse("media_details", args=["wikidata", "theater", "Q998", "hamilton"])
+        )
+        self.assertContains(details, "First visit")
+        self.assertContains(details, "Canonical Hamilton")
+        self.entities["Q996"] = {
+            **self.entities["Q19320959"],
+            "redirects": {"from": "Q996", "to": "Q19320959"},
+        }
+        cache.clear()
+        self.client.post(
+            reverse("media_save"),
+            {
+                "media_id": "Q996",
+                "source": "wikidata",
+                "media_type": "theater",
+                "status": "Planning",
+                "notes": "Second visit",
+            },
+        )
+        self.assertEqual(
+            set(
+                Item.objects.filter(media_type="theater").values_list(
+                    "media_id", flat=True
+                )
+            ),
+            {"Q997"},
+        )
+        first.refresh_from_db()
+        self.assertEqual(first.item.media_id, "Q997")
+        self.assertEqual(
+            set(
+                Theater.objects.filter(item=first.item).values_list("notes", flat=True)
+            ),
+            {"First visit", "Second visit"},
+        )
+        self.assertEqual(
+            TheaterRedirect.objects.get(alias_id="Q998").canonical_id, "Q19320959"
+        )
+        response = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+        )
+        self.assertEqual(
+            [
+                result["item"]["media_id"]
+                for result in response.context["data"]["results"]
+            ],
+            ["Q997"],
+        )
+
+    def test_intermediate_redirect_does_not_save_when_terminal_is_unavailable(self):
+        """A failed canonical lookup must not save under an intermediate ID."""
+        TheaterRedirect.objects.create(
+            alias_id="Q19320959", canonical_id="Q997", revision=100
+        )
+
+        def source_response(url, params, **kwargs):
+            if params.get("ids") == "Q997":
+                raise requests.Timeout
+            return self.source_response(url, params, **kwargs)
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.post(
+                reverse("media_save"),
+                {
+                    "media_id": "Q998",
+                    "source": "wikidata",
+                    "media_type": "theater",
+                    "status": "Planning",
+                    "notes": "Do not save to intermediate",
+                },
+            )
+        self.assertEqual(response.status_code, 500)
+        self.assertFalse(Theater.objects.filter(user=self.user).exists())
+        self.assertFalse(Item.objects.filter(media_type="theater").exists())
+        self.assertEqual(
+            TheaterRedirect.objects.get(alias_id="Q998").canonical_id, "Q19320959"
+        )
+
     def test_redirect_chain_retains_original_evidence_and_one_work(self):
         """Later redirects resolve old URLs without rewriting their evidence."""
         self.client.post(
