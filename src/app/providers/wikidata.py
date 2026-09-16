@@ -569,16 +569,21 @@ def search(query, page):
     return response
 
 
-@commons.request_budget()
+@commons.request_budget(
+    request_limit=commons.PAGE_REQUEST_LIMIT, time_limit=commons.PAGE_TIME_LIMIT
+)
 def illustrate_page(displayed, article_artworks):
     """Prioritize article images while retaining the separate Commons page budget."""
-    illustrated = [
-        illustrate(
-            work,
-            article_artwork=article_artworks[work["media_id"]],
-        )
-        for work in displayed
-    ]
+    with commons.batch_files(
+        [work for work in displayed if not article_artworks[work["media_id"]]]
+    ):
+        illustrated = [
+            illustrate(
+                work,
+                article_artwork=article_artworks[work["media_id"]],
+            )
+            for work in displayed
+        ]
     for work in illustrated:
         work["artwork_partial"] = work["artwork_partial"] or wikipedia.incomplete(
             article_artworks[work["media_id"]]

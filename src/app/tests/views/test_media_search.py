@@ -304,6 +304,296 @@ class TheaterDiscoveryTests(TestCase):
             )
             self.assertContains(details, "Lin-Manuel Miranda")
 
+    def _batch_source(self):
+        """Provide distinct files and controllable failures at the HTTP boundary."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )
+        self.search_ids = ["Q822850", "Q822851", "Q822852"]
+        for index, identifier in enumerate(self.search_ids):
+            work = json.loads(json.dumps(fixture["work"]))
+            work.update(id=identifier, labels={"en": {"value": f"Stage work {index}"}})
+            work["claims"]["P18"][0]["mainsnak"]["datavalue"]["value"] = (
+                f"Stage {index}.jpg"
+            )
+            self.entities[identifier] = work
+        calls = []
+        state = {"mode": "success", "elapsed": 0}
+
+        def source_response(url, params, **kwargs):
+            mode = state["mode"]
+            if "commons.wikimedia.org" not in url:
+                return self.source_response(url, params, **kwargs)
+            calls.append(params["titles"])
+            titles = params["titles"].split("|")
+            if mode == "batch_timeout" and len(titles) > 1:
+                raise requests.Timeout
+            if mode == "file_timeout" and "File:Stage 1.jpg" in titles:
+                raise requests.Timeout
+            if mode == "throttled":
+                response = requests.Response()
+                response.status_code = 429
+                response.headers["Retry-After"] = "60"
+                return response
+            if mode == "late_budget":
+                state["elapsed"] = 31
+            pages = {}
+            for title in params["titles"].split("|"):
+                index = int(title.removeprefix("File:Stage ").removesuffix(".jpg"))
+                page = json.loads(
+                    json.dumps(fixture["commons"]["query"]["pages"]["123"])
+                )
+                page.update(pageid=123 + index, title=title)
+                self._change_batched_file(page, mode, index)
+                image = (
+                    f"https://thumb.wikimedia.org/wikipedia/commons/stage-{index}.png"
+                )
+                page["imageinfo"][0].update(url=image, thumburl=image)
+                pages[str(page["pageid"])] = page
+            response = requests.Response()
+            response.status_code = 200
+            payload = {"query": {"pages": pages}}
+            if mode == "redirect":
+                payload["query"]["redirects"] = [
+                    {"from": "File:Stage 1.jpg", "to": "File:Renamed.jpg"}
+                ]
+            response._content = json.dumps(payload).encode()
+            return response
+
+        return source_response, calls, state
+
+    def test_commons_batches_direct_files_across_works(self):
+        """Shared metadata requests keep each work's file and credits separate."""
+        source_response, calls, _state = self._batch_source()
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "stage"}
+            )
+            results = response.context["data"]["results"]
+            self.assertEqual(len(results), 3)
+            self.assertEqual(
+                calls, ["File:Stage 0.jpg|File:Stage 1.jpg|File:Stage 2.jpg"]
+            )
+            for index, result in enumerate(results):
+                self.assertEqual(
+                    result["item"]["image"],
+                    f"https://thumb.wikimedia.org/wikipedia/commons/stage-{index}.png",
+                )
+                self.assertEqual(
+                    result["item"]["theater_artwork"]["work_id"], self.search_ids[index]
+                )
+            self.client.get(reverse("search"), {"media_type": "theater", "q": "stage"})
+            self.assertEqual(len(calls), 1)
+            cache.delete("commons_v11_Q822851")
+            self.client.get(reverse("search"), {"media_type": "theater", "q": "stage"})
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[-1], "File:Stage 1.jpg")
+
+    def test_commons_normalization_then_redirect_keeps_file_mapping(self):
+        """Map normalized aliases to their resolved file without crossing works."""
+        source_response, calls, state = self._batch_source()
+        state["mode"] = "redirect"
+        self.entities["Q822851"]["claims"]["P18"][0]["mainsnak"]["datavalue"][
+            "value"
+        ] = "stage_1.jpg"
+
+        def normalized_response(url, params, **kwargs):
+            if "commons.wikimedia.org" not in url:
+                return source_response(url, params, **kwargs)
+            response = source_response(
+                url,
+                {
+                    **params,
+                    "titles": params["titles"].replace(
+                        "File:stage_1.jpg", "File:Stage 1.jpg"
+                    ),
+                },
+                **kwargs,
+            )
+            payload = response.json()
+            payload["query"]["normalized"] = [
+                {"from": "File:stage_1.jpg", "to": "File:Stage 1.jpg"}
+            ]
+            response._content = json.dumps(payload).encode()
+            return response
+
+        with patch(
+            "app.providers.services.session.get", side_effect=normalized_response
+        ):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "stage"}
+            )
+        self.assertEqual(len(calls), 1)
+        artwork = response.context["data"]["results"][1]["item"]["theater_artwork"]
+        self.assertEqual(artwork["title"], "Renamed.jpg")
+        self.assertEqual(artwork["work_id"], "Q822851")
+
+    def test_commons_insufficient_recovery_capacity_avoids_batching(self):
+        """Fall back to independent calls when the retry reserve cannot be met."""
+        source_response, calls, state = self._batch_source()
+        state["mode"] = "file_timeout"
+        with (
+            patch("app.providers.services.session.get", side_effect=source_response),
+            patch("app.providers.commons.BATCH_RECOVERY_REQUESTS", 49),
+        ):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "stage"}
+            )
+        self.assertEqual(
+            calls, ["File:Stage 0.jpg", "File:Stage 1.jpg", "File:Stage 2.jpg"]
+        )
+        results = response.context["data"]["results"]
+        self.assertEqual(
+            [bool(result["item"]["theater_artwork"]) for result in results],
+            [True, False, True],
+        )
+
+    def test_commons_batch_failures_are_isolated_and_bounded(self):
+        """Recover good neighbors without retrying throttled requests."""
+        source_response, calls, state = self._batch_source()
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            for mode, expected_calls, expected_images in (
+                ("batch_timeout", 4, [True, True, True]),
+                ("file_timeout", 4, [True, False, True]),
+                ("malformed", 4, [True, False, True]),
+                ("wrong_form", 1, [True, False, True]),
+                ("redirect", 1, [True, True, True]),
+                ("throttled", 1, [False, False, False]),
+            ):
+                with self.subTest(mode=mode):
+                    cache.clear()
+                    calls.clear()
+                    state["mode"] = mode
+                    response = self.client.get(
+                        reverse("search"), {"media_type": "theater", "q": "stage"}
+                    )
+                    results = response.context["data"]["results"]
+                    self.assertEqual(
+                        [bool(result["item"]["theater_artwork"]) for result in results],
+                        expected_images,
+                    )
+                    self.assertEqual(len(calls), expected_calls)
+                    if mode in {"file_timeout", "malformed", "throttled"}:
+                        self.assertTrue(results[1]["item"]["artwork_unavailable"])
+
+    def test_commons_recovered_candidates_survive_an_earlier_failed_file(self):
+        """Use recovered candidates without caching an incomplete selection."""
+        source_response, calls, state = self._batch_source()
+        work = self.entities["Q822850"]
+        work["claims"]["P18"] = [
+            {"mainsnak": {"datavalue": {"value": filename}}}
+            for filename in ("Stage 1.jpg", "Stage 0.jpg")
+        ]
+        state["mode"] = "file_timeout"
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "stage"}
+            )
+            results = response.context["data"]["results"]
+            self.assertEqual(len(calls), 4)
+            self.assertTrue(results[0]["item"]["theater_artwork"])
+            self.assertTrue(results[0]["item"]["artwork_partial"])
+            self.assertFalse(results[1]["item"]["theater_artwork"])
+            self.assertTrue(results[2]["item"]["theater_artwork"])
+            state["mode"] = "success"
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "stage"}
+            )
+            results = response.context["data"]["results"]
+            self.assertEqual(len(calls), 5)
+            self.assertTrue(
+                all(result["item"]["theater_artwork"] for result in results)
+            )
+            self.assertFalse(
+                any(result["item"]["artwork_partial"] for result in results)
+            )
+
+    def test_commons_short_budget_uses_single_files(self):
+        """A late request does not risk a good file on an unrelated shared batch."""
+        source_response, calls, state = self._batch_source()
+        state["mode"] = "late_budget"
+        clock_started = False
+
+        def clock():
+            nonlocal clock_started
+            if not clock_started:
+                clock_started = True
+                return 0
+            return state["elapsed"] or 20
+
+        with (
+            patch("app.providers.services.session.get", side_effect=source_response),
+            patch("app.providers.commons.monotonic", side_effect=clock),
+        ):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "stage"}
+            )
+        self.assertEqual(calls, ["File:Stage 0.jpg"])
+        self.assertTrue(
+            response.context["data"]["results"][0]["item"]["theater_artwork"]
+        )
+
+    def test_commons_shared_files_preserve_work_identity(self):
+        """Deduplicate requests while keeping each work's artwork independent."""
+        source_response, calls, _state = self._batch_source()
+        self.entities["Q822851"]["claims"]["P18"][0]["mainsnak"]["datavalue"][
+            "value"
+        ] = "Stage 0.jpg"
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "stage"}
+            )
+        results = response.context["data"]["results"]
+        self.assertEqual(calls, ["File:Stage 0.jpg|File:Stage 2.jpg"])
+        self.assertEqual(results[0]["item"]["image"], results[1]["item"]["image"])
+        for identifier, result in zip(self.search_ids, results, strict=True):
+            self.assertEqual(result["item"]["theater_artwork"]["work_id"], identifier)
+
+    def test_commons_batch_continuation_keeps_later_warnings(self):
+        """A warning in a later metadata fragment rejects only that file."""
+        source_response, calls, _state = self._batch_source()
+
+        def continued_response(url, params, **kwargs):
+            response = source_response(url, params, **kwargs)
+            if "commons.wikimedia.org" not in url:
+                return response
+            payload = response.json()
+            if "tlcontinue" not in params:
+                payload["continue"] = {"tlcontinue": "next", "continue": "||"}
+            else:
+                payload["query"]["pages"]["124"]["templates"].append(
+                    {"title": "Template:Copyright violation"}
+                )
+            response._content = json.dumps(payload).encode()
+            return response
+
+        with patch(
+            "app.providers.services.session.get", side_effect=continued_response
+        ):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "stage"}
+            )
+        results = response.context["data"]["results"]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(
+            [bool(result["item"]["theater_artwork"]) for result in results],
+            [True, False, True],
+        )
+
+    @staticmethod
+    def _change_batched_file(page, mode, index):
+        """Simulate one file's independent metadata without mocking selection."""
+        if index != 1:
+            return
+        if mode == "malformed":
+            page["templates"] = None
+        elif mode == "wrong_form":
+            page["imageinfo"][0]["extmetadata"]["ImageDescription"] = {
+                "value": "Performance of an opera"
+            }
+        elif mode == "redirect":
+            page["title"] = "File:Renamed.jpg"
+
     def test_missing_direct_image_never_searches_commons(self):
         """Keep imageless works visible without exploratory image requests."""
 
@@ -2115,23 +2405,31 @@ class TheaterDiscoveryTests(TestCase):
         fixture = json.loads(
             (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
         )
-        self.entities["Q822850"] = fixture["work"]
-        self.entities["Q822851"] = {
-            **fixture["work"],
-            "id": "Q822851",
-            "labels": {"en": {"value": "Second stage work"}},
-        }
-        self.search_ids = ["Q822850", "Q822851"]
+        self.search_ids = ["Q822850", "Q822851", "Q822852", "Q822853"]
+        for identifier in self.search_ids:
+            work = json.loads(json.dumps(fixture["work"]))
+            work.update(id=identifier, labels={"en": {"value": identifier}})
+            work["claims"]["P18"][0]["mainsnak"]["datavalue"]["value"] = (
+                f"{identifier}.jpg"
+            )
+            self.entities[identifier] = work
         elapsed = 0
 
         def source_response(url, params, **kwargs):
             nonlocal elapsed
             if "commons.wikimedia.org" not in url:
                 return self.source_response(url, params, **kwargs)
-            elapsed += 21
+            elapsed += 31
+            pages = {}
+            for index, title in enumerate(params["titles"].split("|")):
+                page = json.loads(
+                    json.dumps(fixture["commons"]["query"]["pages"]["123"])
+                )
+                page.update(pageid=index + 123, title=title)
+                pages[str(index + 123)] = page
             response = requests.Response()
             response.status_code = 200
-            response._content = json.dumps(fixture["commons"]).encode()
+            response._content = json.dumps({"query": {"pages": pages}}).encode()
             return response
 
         with (
@@ -2146,36 +2444,49 @@ class TheaterDiscoveryTests(TestCase):
                 reverse("search"), {"media_type": "theater", "q": "stage"}
             )
         results = response.context["data"]["results"]
-        self.assertEqual(len(results), 2)
-        self.assertTrue(results[0]["item"]["theater_artwork"])
-        self.assertFalse(results[1]["item"]["theater_artwork"])
-        self.assertContains(response, "Second stage work")
+        self.assertEqual(len(results), 4)
+        self.assertTrue(
+            all(result["item"]["theater_artwork"] for result in results[:3])
+        )
+        self.assertFalse(results[3]["item"]["theater_artwork"])
+        self.assertTrue(results[3]["item"]["artwork_unavailable"])
+        self.assertContains(response, "Q822853")
 
     def test_artwork_request_budget_limits_a_page_without_hiding_works(self):
         """Fast responses still respect the page call cap and next requests reset it."""
         fixture = json.loads(
             (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
         )
-        fixture["work"]["claims"]["P18"] = [
-            {"mainsnak": {"datavalue": {"value": filename}}}
-            for filename in ["First.png", "Second.png", "Third.png", "Fourth.png"]
-        ]
         self.search_ids = [f"Q{number}" for number in range(40000, 40020)]
-        self.entities.update(
-            {
-                identifier: {**fixture["work"], "id": identifier}
-                for identifier in self.search_ids
-            }
-        )
+        for identifier in self.search_ids:
+            work = json.loads(json.dumps(fixture["work"]))
+            work["id"] = identifier
+            work["claims"]["P18"] = [
+                {"mainsnak": {"datavalue": {"value": f"{identifier}-{number}.jpg"}}}
+                for number in range(5)
+            ]
+            self.entities[identifier] = work
+        calls = []
 
         def source_response(url, params, **kwargs):
             if "commons.wikimedia.org" not in url:
                 return self.source_response(url, params, **kwargs)
             self.assertGreater(kwargs["timeout"], 0)
             self.assertLessEqual(kwargs["timeout"], 8)
+            calls.append(params)
+            pages = {}
+            for index, title in enumerate(params["titles"].split("|")):
+                page = json.loads(
+                    json.dumps(fixture["commons"]["query"]["pages"]["123"])
+                )
+                page.update(pageid=index + 123, title=title)
+                pages[str(index + 123)] = page
+            payload = {"query": {"pages": pages}}
+            if "tlcontinue" not in params:
+                payload["continue"] = {"tlcontinue": "next", "continue": "||"}
             response = requests.Response()
             response.status_code = 200
-            response._content = json.dumps(fixture["commons"]).encode()
+            response._content = json.dumps(payload).encode()
             return response
 
         with (
@@ -2187,9 +2498,12 @@ class TheaterDiscoveryTests(TestCase):
             )
             results = response.context["data"]["results"]
             self.assertEqual(len(results), 20)
-            self.assertEqual(
-                sum(bool(result["item"]["theater_artwork"]) for result in results), 12
+            self.assertEqual(len(calls), 48)
+            illustrated = sum(
+                bool(result["item"]["theater_artwork"]) for result in results
             )
+            self.assertGreater(illustrated, 0)
+            self.assertLess(illustrated, 20)
             details = self.client.get(
                 reverse(
                     "media_details", args=["wikidata", "theater", "Q40019", "stage"]

@@ -5,6 +5,7 @@ import re
 import unicodedata
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
@@ -33,7 +34,11 @@ MIN_CREATOR_WORDS = 2
 ARTWORK_REQUEST_LIMIT = 24
 ARTWORK_TIME_LIMIT = 20
 ARTWORK_HTTP_TIMEOUT = 8
+PAGE_REQUEST_LIMIT = 48
+PAGE_TIME_LIMIT = 30
+BATCH_RECOVERY_REQUESTS = 8
 _request_budget = ContextVar("commons_request_budget", default=None)
+_page_files = ContextVar("commons_page_files", default=None)
 
 
 class ArtworkUnavailableError(Exception):
@@ -57,9 +62,11 @@ class ArtworkBudget:
 
 
 @contextmanager
-def request_budget():
+def request_budget(
+    *, request_limit=ARTWORK_REQUEST_LIMIT, time_limit=ARTWORK_TIME_LIMIT
+):
     """Scope an artwork budget to a page without leaking across users/threads."""
-    token = _request_budget.set(ArtworkBudget(monotonic() + ARTWORK_TIME_LIMIT))
+    token = _request_budget.set(ArtworkBudget(monotonic() + time_limit, request_limit))
     try:
         yield
     finally:
@@ -604,41 +611,158 @@ def merge_file_metadata(merged, response):
                 previous[key] = value
 
 
-def image_pages(filenames):
-    """Fetch file rights and warning metadata in small complete batches."""
-    for offset in range(0, len(filenames), 3):
-        params = {
-            "action": "query",
-            "redirects": 1,
-            "titles": "|".join(
-                f"File:{filename}" for filename in filenames[offset : offset + 3]
-            ),
-            "prop": "imageinfo|categories|templates|info",
-            "cllimit": 500,
-            "tllimit": 500,
-            "iiprop": "url|size|mime|timestamp|sha1|extmetadata|badfile",
-            "iilimit": 1,
-            "iiurlwidth": 300,
-            "iiextmetadatalanguage": "en",
-        }
-        merged = {}
-        continuation = {}
-        for _page in range(2):
-            response = request_data({**params, **continuation})
-            if "continue" in response and not isinstance(response["continue"], dict):
-                raise ArtworkUnavailableError
-            merge_file_metadata(merged, response)
-            continuation = {
-                key: value
-                for key, value in response.get("continue", {}).items()
-                if key in {"clcontinue", "tlcontinue"}
-            }
-            if not continuation:
-                break
-            continuation["continue"] = "||"
-        if continuation:
+def file_metadata(filenames):
+    """Read a complete small file batch and its source-provided title aliases."""
+    params = {
+        "action": "query",
+        "redirects": 1,
+        "titles": "|".join(f"File:{filename}" for filename in filenames),
+        "prop": "imageinfo|categories|templates|info",
+        "cllimit": 500,
+        "tllimit": 500,
+        "iiprop": "url|size|mime|timestamp|sha1|extmetadata|badfile",
+        "iilimit": 1,
+        "iiurlwidth": 300,
+        "iiextmetadatalanguage": "en",
+    }
+    merged, continuation, aliases = {}, {}, {}
+    for _page in range(2):
+        response = request_data({**params, **continuation})
+        if "continue" in response and not isinstance(response["continue"], dict):
             raise ArtworkUnavailableError
-        yield from merged.values()
+        merge_file_metadata(merged, response)
+        for field in ("normalized", "redirects"):
+            entries = response["query"].get(field, [])
+            if not isinstance(entries, list):
+                raise ArtworkUnavailableError
+            for entry in entries:
+                if not isinstance(entry, dict) or not all(
+                    isinstance(entry.get(key), str) for key in ("from", "to")
+                ):
+                    raise ArtworkUnavailableError
+                aliases[entry["from"]] = entry["to"]
+        continuation = {
+            key: value
+            for key, value in response.get("continue", {}).items()
+            if key in {"clcontinue", "tlcontinue"}
+        }
+        if not continuation:
+            break
+        continuation["continue"] = "||"
+    if continuation:
+        raise ArtworkUnavailableError
+    return list(merged.values()), aliases
+
+
+class PageFiles:
+    """Resolve shared metadata lazily while keeping per-work selection isolated."""
+
+    def __init__(self, filenames):
+        """Keep file metadata private to one search page."""
+        self.pending = list(dict.fromkeys(filenames))
+        self.pages = {}
+        self.unavailable = set()
+
+    def fetch(self, filenames):
+        """Associate complete metadata through API-provided title mappings."""
+        pages, aliases = file_metadata(filenames)
+        if any(not isinstance(page.get("title"), str) for page in pages):
+            raise ArtworkUnavailableError
+        by_title = {page.get("title"): page for page in pages}
+        resolved = {}
+        for filename in filenames:
+            title = f"File:{filename}"
+            visited = set()
+            while title in aliases and title not in visited:
+                visited.add(title)
+                title = aliases[title]
+            if title in visited or title not in by_title:
+                raise ArtworkUnavailableError
+            resolved[filename] = by_title[title]
+        self.pages.update(resolved)
+
+    def load(self, filenames):
+        """Split a failed batch once, unless the source requests back-pressure."""
+        try:
+            self.fetch(filenames)
+        except ArtworkUnavailableError:
+            if len(filenames) == 1 or cache.get("commons_retry_after"):
+                self.unavailable.update(filenames)
+                return
+            for filename in filenames:
+                self.load([filename])
+
+    def read(self, filenames):
+        """Prioritize requested files and avoid speculative batches near limits."""
+        incomplete = False
+        for filename in filenames:
+            if filename not in self.pages and filename not in self.unavailable:
+                budget = _request_budget.get()
+                can_batch = budget is None or (
+                    budget.remaining >= BATCH_RECOVERY_REQUESTS
+                    and budget.deadline - monotonic() >= 2 * ARTWORK_HTTP_TIMEOUT
+                )
+                batch = [filename]
+                if can_batch:
+                    batch.extend(
+                        pending for pending in self.pending if pending != filename
+                    )
+                    batch = batch[:3]
+                self.pending = [
+                    pending for pending in self.pending if pending not in batch
+                ]
+                self.load(batch)
+            if filename in self.unavailable:
+                incomplete = True
+                continue
+            yield deepcopy(self.pages[filename])
+        if incomplete:
+            raise ArtworkUnavailableError
+
+
+@contextmanager
+def batch_files(works):
+    """Group only uncached direct files needed by this result page."""
+    pending = []
+    for work in works:
+        identifier = work.get("artwork_work_id", work["media_id"])
+        cached = cache.get(f"commons_v{POLICY_VERSION}_{identifier}")
+        if (
+            cached is not None
+            and cached.get("work_revision") == work.get("work_revision")
+            and cached.get("work_forms") == list(work["theater_forms"])
+        ):
+            continue
+        filenames = list(
+            dict.fromkeys(
+                filename
+                for filename in work.get("artwork_candidates", [])
+                if isinstance(filename, str)
+            )
+        )[:5]
+        if filenames:
+            pending.append(filenames)
+    resolver = (
+        PageFiles([filename for filenames in pending for filename in filenames])
+        if len(pending) > 1
+        else None
+    )
+    token = _page_files.set(resolver)
+    try:
+        yield
+    finally:
+        _page_files.reset(token)
+
+
+def image_pages(filenames):
+    """Fetch complete file metadata, reusing page batches when available."""
+    resolver = _page_files.get()
+    if resolver is not None:
+        yield from resolver.read(filenames)
+        return
+    for offset in range(0, len(filenames), 3):
+        pages, _aliases = file_metadata(filenames[offset : offset + 3])
+        yield from pages
 
 
 def artwork(
