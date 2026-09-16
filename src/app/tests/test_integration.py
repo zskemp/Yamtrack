@@ -70,18 +70,37 @@ class IntegrationTest(StaticLiveServerTestCase):
                 self.page.get_by_title(f"Local Work {width}", exact=True).click()
                 expect(self.page.get_by_role("main")).to_contain_text("Play, Musical")
                 expect(self.page.get_by_role("main")).to_contain_text("First Theatre")
-                self.page.get_by_title("More tracking options").click()
-                self.page.get_by_role("button", name="Add new entry").click()
+                first_visit = json.loads(
+                    self.page.locator(
+                        "button[hx-get*='track_modal']"
+                    ).first.get_attribute("hx-vals")
+                )["instance_id"]
+                self._click_settled(self.page.get_by_title("More tracking options"))
+                self._click_settled(
+                    self.page.get_by_role("button", name="Add new entry")
+                )
                 self.page.get_by_label("Venue", exact=True).fill("Second Theatre")
-                self.page.get_by_role("button", name="Add", exact=True).click()
+                self._click_settled(
+                    self.page.get_by_role("button", name="Add", exact=True)
+                )
                 expect(self.page.get_by_role("main")).to_contain_text("Second Theatre")
                 expect(self.page.get_by_role("main")).to_contain_text("First Theatre")
-                self.page.get_by_title("Edit entry", exact=True).click()
+                self._click_settled(
+                    self.page.locator(
+                        "button[hx-get*='track_modal']"
+                        f'[hx-vals*=\'"instance_id": "{first_visit}"\']'
+                    )
+                )
+                expect(self.page.get_by_label("Venue", exact=True)).to_have_value(
+                    "First Theatre"
+                )
                 self.page.get_by_label("Venue", exact=True).fill("Revised Theatre")
                 self.page.get_by_label("Notes", exact=True).fill(
                     "Earlier visit corrected"
                 )
-                self.page.get_by_role("button", name="Update", exact=True).click()
+                self._click_settled(
+                    self.page.get_by_role("button", name="Update", exact=True)
+                )
                 expect(self.page.get_by_role("main")).to_contain_text("Revised Theatre")
                 expect(self.page.get_by_role("main")).to_contain_text("Second Theatre")
                 self.page.goto(f"{self.live_server_url}/journal")
@@ -94,6 +113,12 @@ class IntegrationTest(StaticLiveServerTestCase):
                     ),
                 )
         self.page.set_viewport_size({"width": 1280, "height": 720})
+
+    def _click_settled(self, control):
+        """Wait for injected controls to be initialized before interacting."""
+        expect(control).to_be_visible()
+        expect(self.page.locator(".htmx-settling")).to_have_count(0)
+        control.click()
 
     def test_theater_library_filter_and_custom_list(self):
         """Organize manual works through existing library and list controls."""
