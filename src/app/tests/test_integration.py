@@ -287,6 +287,124 @@ class IntegrationTest(StaticLiveServerTestCase):
             self.page.set_viewport_size({"width": 1280, "height": 720})
             cache.clear()
 
+    def test_theater_category_image_search_to_library(self):
+        """Category-backed images and credits remain usable at both viewport sizes."""
+        fixture = json.loads(
+            (Path(__file__).parent / "mock_data/theater_artwork.json").read_text()
+        )
+        fixture["work"]["claims"].pop("P18")
+        fixture["work"]["claims"].update(
+            {
+                "P373": [{"mainsnak": {"datavalue": {"value": "Stage Work"}}}],
+                "P50": [{"mainsnak": {"datavalue": {"value": {"id": "Q414"}}}}],
+            }
+        )
+        image_info = fixture["commons"]["query"]["pages"]["123"]["imageinfo"][0]
+        image_info["extmetadata"]["ImageDescription"] = {
+            "value": (
+                "Illustration of The House of Bernarda Alba, "
+                "a play by Federico Garcia Lorca."
+            ),
+        }
+        image_url = image_info["url"]
+        image = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII="
+        )
+
+        def source_response(url, params, **_kwargs):
+            if "commons.wikimedia.org" not in url:
+                payload = (
+                    {"query": {"search": [{"title": "Q822850"}]}}
+                    if params["action"] == "query"
+                    else {
+                        "entities": {
+                            "Q822850": fixture["work"],
+                            "Q414": {
+                                "id": "Q414",
+                                "labels": {"en": {"value": "Federico Garcia Lorca"}},
+                            },
+                        }
+                    }
+                )
+            elif params.get("list") == "search":
+                payload = {"query": {"search": []}}
+            elif params.get("prop") == "pageprops|info":
+                payload = {
+                    "query": {
+                        "pages": {
+                            "456": {
+                                "pageid": 456,
+                                "ns": 14,
+                                "lastrevid": 700,
+                                "title": "Category:Stage Work",
+                                "pageprops": {"wikibase_item": "Q822850"},
+                            }
+                        }
+                    }
+                }
+            elif params.get("list") == "categorymembers":
+                payload = {
+                    "query": {
+                        "categorymembers": [
+                            {
+                                "ns": 6,
+                                "pageid": 123,
+                                "title": "File:Test stage photograph.jpg",
+                            }
+                        ]
+                    }
+                }
+            else:
+                payload = fixture["commons"]
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(payload).encode()
+            return response
+
+        cache.clear()
+        self.page.route(
+            image_url, lambda route: route.fulfill(body=image, content_type="image/png")
+        )
+        try:
+            with patch(
+                "app.providers.services.session.get", side_effect=source_response
+            ):
+                for visit, width in enumerate((1280, 390)):
+                    self.page.set_viewport_size({"width": width, "height": 900})
+                    self.page.goto(
+                        f"{self.live_server_url}/search?media_type=theater&q=Bernarda"
+                    )
+                    picture = self.page.get_by_role(
+                        "img", name="The House of Bernarda Alba", exact=True
+                    )
+                    expect(picture).to_have_js_property("naturalWidth", 1)
+                    expect(picture).to_have_css("object-fit", "contain")
+                    self.page.get_by_title(
+                        "The House of Bernarda Alba", exact=True
+                    ).click()
+                    if visit == 0:
+                        self.page.get_by_role(
+                            "button", name="Add to tracker", exact=True
+                        ).click()
+                        self.page.get_by_label("Venue", exact=True).fill(
+                            "Local Theatre"
+                        )
+                        self.page.get_by_role("button", name="Add", exact=True).click()
+                    self.page.goto(f"{self.live_server_url}/test/theater")
+                    self.page.get_by_text("Image credit", exact=True).click()
+                    expect(
+                        self.page.get_by_role("link", name="CC BY-SA 4.0", exact=True)
+                    ).to_be_visible()
+                    self.assertTrue(
+                        self.page.evaluate(
+                            "document.documentElement.scrollWidth <= window.innerWidth"
+                        )
+                    )
+        finally:
+            self.page.unroute(image_url)
+            self.page.set_viewport_size({"width": 1280, "height": 720})
+            cache.clear()
+
     def test_theater_redirect_keeps_saved_attendance_visible(self):
         """Duplicate provider IDs resolve to one card without losing a saved visit."""
         fixture = json.loads(

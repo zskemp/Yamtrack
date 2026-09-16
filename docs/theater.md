@@ -53,6 +53,24 @@ revision change or unfinished continuation is unavailable data, not a confirmed
 rejection. A later optional batch failure does not discard an image already
 qualified from a completed batch. Partial scans are not cached, allowing a later
 retry to select a preferred image. No recursive image search is performed.
+Image-history continuation is not rights metadata: only the current upload is
+used. Template/category continuation retains current file information rather than
+following older uploads.
+
+When direct images and exact depictions yield no usable candidate, the first
+work-supplied Commons category may provide up to ten direct files. The category
+must link back to the exact Wikidata work. An accepted file must independently
+describe an illustration, photograph, poster, scene or performance of the exact
+work title and theater form by a known creator. This initial description grammar
+supports English labels/aliases; short creator names and fuzzy matching are not
+used. Wrong forms, negated descriptions, unrelated portraits and rights failures
+are rejected. Category ID/revision and the matching evidence are retained with
+the image and survive own-data export/restore. Category membership alone never
+proves a match. This fallback shares the existing page budget below.
+Malformed category responses are unavailable data, not a reason to fail the work
+search. A failed exact-depiction lookup can fall back to the category while budget
+remains. Restoring category artwork requires its category identity/revision and
+internally consistent description, creator, form and original work evidence.
 Displayed-page enrichment shares a 24-request Commons budget and stops scheduling
 new artwork calls after 20 seconds. Each HTTP wait is limited to at most eight
 seconds or the remaining budget, whichever is smaller. Cached qualified artwork
@@ -70,6 +88,14 @@ license-template evidence and supplied artist attribution. Explicit PD-textlogo
 and PD-old-auto/70/100-expired bases are supported when Commons also identifies
 the file as not copyrighted; the named basis and jurisdiction caveats are retained.
 No generic "Public domain" string is treated as sufficient evidence.
+The specifically asserted PD-US-dust-jacket basis is also supported: it concerns
+the jacket's US notice-formality status, not the book text or worldwide rights.
+Supplied permission text and PD-Art reproduction caveats remain visible/exported.
+Valid older PD-Art exports gain the new reproduction caveat during offline restore
+after their previously expected notice is checked; current notices cannot be
+silently omitted. This migration does not change the source grant or work identity.
+Generic PD-old files without explicit publication evidence are not silently
+promoted to a US-expired basis from creation dates, EXIF or upload timestamps.
 
 The catalog-reuse policy favors coverage using published source assessments.
 Standard personality, trademark and costume notices accompany the image rather

@@ -78,7 +78,7 @@ def entities(identifiers):
             {
                 "action": "wbgetentities",
                 "ids": "|".join(batch),
-                "props": "info|labels|descriptions|claims",
+                "props": "info|labels|aliases|descriptions|claims",
                 "languages": "en",
                 "languagefallback": 1,
                 "redirects": "yes",
@@ -173,6 +173,16 @@ def transform(entity, related):
     ]
     if languages:
         details["original_language"] = ", ".join(languages)
+    creator_names = list(dict.fromkeys(creators))
+    for property_id in CREATOR_ROLES:
+        for identifier in identifiers(entity, property_id):
+            creator_names.extend(
+                alias["value"]
+                for alias in related.get(identifier, {})
+                .get("aliases", {})
+                .get("en", [])
+                if isinstance(alias.get("value"), str)
+            )
     return {
         "media_id": entity["id"],
         "source": Sources.WIKIDATA.value,
@@ -182,6 +192,20 @@ def transform(entity, related):
         "image": settings.IMG_NONE,
         "theater_artwork": {},
         "artwork_candidates": artwork_candidates(entity),
+        "artwork_category_context": {
+            "categories": [
+                value for value in values(entity, "P373") if isinstance(value, str)
+            ][:1],
+            "titles": [
+                label(entity),
+                *[
+                    alias["value"]
+                    for alias in entity.get("aliases", {}).get("en", [])
+                    if isinstance(alias.get("value"), str)
+                ],
+            ],
+            "creators": list(dict.fromkeys(creator_names)),
+        },
         "work_revision": entity.get("lastrevid"),
         "theater_forms": work_forms,
         "work_description": " / ".join([details["forms"], *dict.fromkeys(creators)]),
@@ -216,6 +240,7 @@ def illustrate(work):
         work.pop("artwork_candidates", []),
         work.get("work_revision"),
         work["theater_forms"],
+        category_context=work.get("artwork_category_context"),
     )
     work["artwork_unavailable"] = artwork is None
     work["artwork_partial"] = bool(artwork) and not artwork.get(
@@ -257,7 +282,7 @@ def theater(media_id):
 def search(query, page):
     """Filter a bounded candidate window before canonical result pagination."""
     literal = " ".join(query.split())[:200]
-    key = f"wikidata_search_v4_{literal}"
+    key = f"wikidata_search_v5_{literal}"
     cached = cache.get(key)
     if cached is None:
         escaped = literal.replace("\\", "\\\\").replace('"', '\\"')

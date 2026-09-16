@@ -2,6 +2,7 @@
 
 import logging
 import re
+import unicodedata
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -22,10 +23,15 @@ from app.providers import services
 
 logger = logging.getLogger(__name__)
 BASE_URL = "https://commons.wikimedia.org/w/api.php"
-POLICY_VERSION = 6
+POLICY_VERSION = 8
 LEGACY_POLICY_VERSION = 3
+PD_ART_NOTICE_POLICY_VERSION = 8
 MIN_IMAGE_DIMENSION = 200
 DEPICTION_CANDIDATE_LIMIT = 12
+CATEGORY_CANDIDATE_LIMIT = 10
+CATEGORY_NAMESPACE = 14
+FILE_NAMESPACE = 6
+MIN_CREATOR_WORDS = 2
 ARTWORK_REQUEST_LIMIT = 24
 ARTWORK_TIME_LIMIT = 20
 ARTWORK_HTTP_TIMEOUT = 8
@@ -92,6 +98,11 @@ WARNING_PATTERNS = (
     "pd-old-auto without death date",
 )
 PUBLIC_DOMAIN_BASES = {
+    "pd-us-dust-jacket": (
+        "Commons identifies this book jacket as public domain in the United "
+        "States because it was published without the required copyright notice. "
+        "This is not a grant for the book text or other jurisdictions."
+    ),
     "pd-textlogo": (
         "Simple text/logo below the copyright originality threshold; "
         "trademark rights may still apply."
@@ -254,6 +265,12 @@ def reuse_notices(value, tags):
         if not value.get("LicenseNotices"):
             return None
         notices.append(value["LicenseNotices"])
+    if "template:pd-art" in tags:
+        notices.append(
+            "Commons PD-Art assessment covers a faithful reproduction of "
+            "two-dimensional public-domain art; reproduction rights can differ "
+            "by jurisdiction. https://commons.wikimedia.org/wiki/Commons:Reuse_of_PD-Art_photographs"
+        )
     return " ".join(notices)
 
 
@@ -356,10 +373,32 @@ def require_available(metadata):
         )
 
 
+def upgrade_reproduction_notice(artwork):
+    """Reconstruct new caveats only after checking the exact legacy notice."""
+    if (
+        artwork.get("policy") not in {4, 5, 6, 7}
+        or not isinstance(artwork.get("rights"), dict)
+        or not all(isinstance(value, str) for value in artwork["rights"].values())
+        or not isinstance(artwork.get("source_tags"), list)
+        or not all(isinstance(tag, str) for tag in artwork["source_tags"])
+        or "template:pd-art" not in artwork["source_tags"]
+    ):
+        return artwork
+    previous_tags = [tag for tag in artwork["source_tags"] if tag != "template:pd-art"]
+    if artwork.get("notices") != reuse_notices(artwork["rights"], previous_tags):
+        return artwork
+    return {
+        **artwork,
+        "notices": reuse_notices(artwork["rights"], artwork["source_tags"]),
+        "policy": PD_ART_NOTICE_POLICY_VERSION,
+    }
+
+
 def restored_artwork(artwork, work_id, image):
     """Validate portable credits without needing a live provider lookup."""
     if not isinstance(artwork, dict):
         return {}
+    artwork = upgrade_reproduction_notice(artwork)
     required = (
         "image",
         "source_url",
@@ -415,6 +454,8 @@ def complete_credit(artwork):
         3,
         4,
         5,
+        6,
+        7,
         POLICY_VERSION,
     }:
         return False
@@ -424,6 +465,10 @@ def complete_credit(artwork):
     ):
         return False
     if artwork.get("policy") != LEGACY_POLICY_VERSION and not consistent_reuse_record(
+        artwork
+    ):
+        return False
+    if artwork.get("evidence") == "P373/description" and not complete_category_evidence(
         artwork
     ):
         return False
@@ -582,6 +627,7 @@ def image_pages(filenames):
             "cllimit": 500,
             "tllimit": 500,
             "iiprop": "url|size|mime|timestamp|sha1|extmetadata|badfile",
+            "iilimit": 1,
             "iiurlwidth": 300,
             "iiextmetadatalanguage": "en",
         }
@@ -592,18 +638,25 @@ def image_pages(filenames):
             if "continue" in response and not isinstance(response["continue"], dict):
                 raise ArtworkUnavailableError
             merge_file_metadata(merged, response)
-            continuation = response.get("continue", {})
+            continuation = {
+                key: value
+                for key, value in response.get("continue", {}).items()
+                if key in {"clcontinue", "tlcontinue"}
+            }
             if not continuation:
                 break
+            continuation["continue"] = "||"
         if continuation:
             raise ArtworkUnavailableError
         yield from merged.values()
 
 
-def artwork(work_id, filenames, revision, work_forms=()):
+def artwork(work_id, filenames, revision, work_forms=(), *, category_context=None):
     """Preserve the distinction between unavailable and confirmed absent images."""
     try:
-        return select_artwork(work_id, filenames, revision, work_forms)
+        return select_artwork(
+            work_id, filenames, revision, work_forms, category_context
+        )
     except ArtworkUnavailableError:
         return None
 
@@ -648,7 +701,191 @@ def verified_candidates(filenames, work_forms, *, enrichment=False):
     return candidates, False
 
 
-def select_artwork(work_id, filenames, revision, work_forms):
+def normalized_words(value):
+    """Normalize spelling and punctuation without fuzzy title/name equivalence."""
+    return " ".join(
+        re.findall(r"[^\W_]+", unicodedata.normalize("NFKC", value).casefold())
+    )
+
+
+def category_match(page, context, work_forms):
+    """Require an explicit depicted-work title, form and creator description."""
+    info = next(iter(page.get("imageinfo", [])), {})
+    description = text(
+        info.get("extmetadata", {}).get("ImageDescription", {}).get("value", "")
+    )
+    normalized = normalized_words(description)
+    for title in context.get("titles", [])[:16]:
+        for creator in context.get("creators", [])[:32]:
+            if len(normalized_words(creator).split()) < MIN_CREATOR_WORDS:
+                continue
+            for form in work_forms:
+                if form not in {"play", "opera", "musical", "ballet"}:
+                    continue
+                pattern = (
+                    r"^(?:illustration|photograph|photo|poster|scene|performance) "
+                    r"(?:of|from|for) "
+                    + re.escape(normalized_words(title))
+                    + r" (?:a |an )?"
+                    + form
+                    + " by "
+                    + re.escape(normalized_words(creator))
+                    + r"(?=$| illustrator | photographed | published | performed | at )"
+                )
+                if re.search(pattern, normalized):
+                    return {
+                        "matched_title": title,
+                        "matched_creator": creator,
+                        "matched_form": form,
+                        "match_description": description,
+                        "match_source_html": info["extmetadata"]["ImageDescription"][
+                            "value"
+                        ],
+                    }
+    return None
+
+
+def complete_category_evidence(artwork):
+    """Check imported category evidence for completeness and internal consistency."""
+    text_fields = (
+        "category_title",
+        "category_work_id",
+        "matched_title",
+        "matched_creator",
+        "matched_form",
+        "match_description",
+        "match_source_html",
+    )
+    if any(
+        not isinstance(artwork.get(key), str) or not artwork[key] for key in text_fields
+    ):
+        return False
+    if any(
+        type(artwork.get(key)) is not int or artwork[key] <= 0
+        for key in ("category_id", "category_revision")
+    ):
+        return False
+    if (
+        not artwork["category_title"].startswith("Category:")
+        or artwork["category_work_id"]
+        != artwork.get("evidence_work_id", artwork.get("work_id"))
+        or not isinstance(artwork.get("work_forms"), list)
+        or artwork["matched_form"] not in artwork["work_forms"]
+        or credit_text(artwork["match_source_html"])
+        != artwork["rights"].get("ImageDescription")
+    ):
+        return False
+    page = {
+        "imageinfo": [
+            {
+                "extmetadata": {
+                    "ImageDescription": {"value": artwork["match_source_html"]}
+                }
+            }
+        ]
+    }
+    match = category_match(
+        page,
+        {
+            "titles": [artwork["matched_title"]],
+            "creators": [artwork["matched_creator"]],
+        },
+        [artwork["matched_form"]],
+    )
+    return (
+        bool(match)
+        and all(artwork.get(key) == value for key, value in match.items())
+        and suitable_for_work(page, artwork["work_forms"])
+    )
+
+
+def category_query(params):
+    """Validate optional discovery envelopes before reading nested source fields."""
+    response = request_data(params)
+    if not isinstance(response, dict) or not isinstance(response.get("query"), dict):
+        raise ArtworkUnavailableError
+    return response
+
+
+def category_candidates(work_id, context, work_forms):
+    """Discover direct files only through a reciprocal source-linked category."""
+    if not context or not context.get("creators") or not context.get("categories"):
+        return [], False
+    candidates = []
+    try:
+        category_title = "Category:" + context["categories"][0].removeprefix(
+            "Category:"
+        )
+        response = category_query(
+            {"action": "query", "titles": category_title, "prop": "pageprops|info"}
+        )
+        pages = response.get("query", {}).get("pages")
+        category = (
+            next(iter(pages.values()))
+            if isinstance(pages, dict) and len(pages) == 1
+            else {}
+        )
+        if (
+            not isinstance(category, dict)
+            or not isinstance(category.get("lastrevid"), int)
+            or not isinstance(category.get("pageid"), int)
+            or not isinstance(category.get("title"), str)
+            or not isinstance(category.get("pageprops", {}), dict)
+        ):
+            return [], True
+        pageprops = category.get("pageprops", {})
+        if (
+            category.get("ns") != CATEGORY_NAMESPACE
+            or pageprops.get("wikibase_item") != work_id
+        ):
+            return [], False
+        members = category_query(
+            {
+                "action": "query",
+                "list": "categorymembers",
+                "cmpageid": category["pageid"],
+                "cmtype": "file",
+                "cmlimit": CATEGORY_CANDIDATE_LIMIT,
+            }
+        )
+        files = members.get("query", {}).get("categorymembers")
+        if not isinstance(files, list) or any(
+            not isinstance(entry, dict) for entry in files
+        ):
+            return [], True
+        filenames = [
+            entry["title"].removeprefix("File:")
+            for entry in files[:CATEGORY_CANDIDATE_LIMIT]
+            if entry.get("ns") == FILE_NAMESPACE and isinstance(entry.get("title"), str)
+        ]
+        for page in image_pages(filenames):
+            match = category_match(page, context, work_forms)
+            if not match or not suitable_for_work(page, work_forms):
+                continue
+            candidate = qualified_image(page)
+            if candidate:
+                candidate.update(
+                    **match,
+                    category_id=category["pageid"],
+                    category_title=category["title"],
+                    category_revision=category["lastrevid"],
+                    category_work_id=work_id,
+                )
+                candidates.append(candidate)
+    except ArtworkUnavailableError:
+        return candidates, True
+    return candidates, bool(members.get("continue"))
+
+
+def depiction_candidates(work_id, work_forms):
+    """Let independent category discovery proceed after a depiction lookup fails."""
+    try:
+        return verified_candidates(depicted_files(work_id), work_forms, enrichment=True)
+    except ArtworkUnavailableError:
+        return [], True
+
+
+def select_artwork(work_id, filenames, revision, work_forms, category_context=None):
     """Select a reusable work image from at most five direct candidates."""
     filenames = list(
         dict.fromkeys(filename for filename in filenames if isinstance(filename, str))
@@ -665,12 +902,14 @@ def select_artwork(work_id, filenames, revision, work_forms):
     evidence = "P18/P154"
     if not candidates:
         evidence = "P180"
-        candidates, depiction_unavailable = verified_candidates(
-            depicted_files(work_id),
-            work_forms,
-            enrichment=True,
-        )
+        candidates, depiction_unavailable = depiction_candidates(work_id, work_forms)
         unavailable = unavailable or depiction_unavailable
+    if not candidates:
+        evidence = "P373/description"
+        candidates, category_unavailable = category_candidates(
+            work_id, category_context, work_forms
+        )
+        unavailable = unavailable or category_unavailable
     if not candidates and unavailable:
         raise ArtworkUnavailableError
     candidates.sort(
