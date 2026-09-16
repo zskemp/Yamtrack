@@ -218,6 +218,492 @@ class TheaterDiscoveryTests(TestCase):
         response._content = json.dumps(data).encode()
         return response
 
+    def test_wikipedia_poster_search_tracking_and_offline_restore(self):
+        """Exact article posters retain non-free status and attendance identity."""
+        self.entities["Q19320959"]["sitelinks"] = {
+            "enwiki": {"title": "Hamilton (musical)"}
+        }
+        self.search_ids = ["Q19320959", "Q999"]
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )["wikipedia"]
+        image = "https://upload.wikimedia.org/wikipedia/en/thumb/a/ab/Hamilton-poster.jpg/250px-Hamilton-poster.jpg"
+        calls = []
+
+        def source_response(url, params, **kwargs):
+            if url != "https://en.wikipedia.org/w/api.php":
+                return self.source_response(url, params, **kwargs)
+            calls.append(params)
+            response = requests.Response()
+            response.status_code = 200
+            payload = {
+                "query": {
+                    "pages": [
+                        fixture["article"]
+                        if params["prop"] == "pageprops|pageimages|info"
+                        else fixture["file"]
+                    ]
+                }
+            }
+            if params["prop"] != "pageprops|pageimages|info":
+                payload["continue"] = {
+                    "iistart": "2020-01-01T00:00:00Z",
+                    "continue": "||info",
+                }
+            response._content = json.dumps(payload).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            )
+            self.assertContains(response, image)
+            self.assertContains(response, "Non-free")
+            self.client.post(
+                reverse("media_save"),
+                {
+                    "media_id": "Q19320959",
+                    "source": "wikidata",
+                    "media_type": "theater",
+                    "status": "Completed",
+                    "notes": "My visit",
+                },
+            )
+            details = self.client.get(
+                reverse(
+                    "media_details",
+                    args=["wikidata", "theater", "Q19320959", "hamilton"],
+                )
+            )
+            self.assertContains(details, image)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["pilicense"], "any")
+        work = Item.objects.get(media_id="Q19320959")
+        self.assertTrue(work.theater_artwork["non_free"])
+        self._assert_saved_wikipedia_poster_survives_outage(source_response, image)
+        content = b"".join(self.client.get(reverse("export_csv")).streaming_content)
+        work.delete()
+        with patch(
+            "app.providers.services.session.get",
+            side_effect=AssertionError("Offline restore"),
+        ):
+            self.client.post(
+                reverse("import_yamtrack"),
+                {
+                    "mode": "new",
+                    "yamtrack_csv": SimpleUploadedFile("theater.csv", content),
+                },
+            )
+        attendance = Theater.objects.get(user=self.user)
+        self.assertEqual(attendance.notes, "My visit")
+        self.assertEqual(attendance.item.image, image)
+        self.assertTrue(attendance.item.theater_artwork["non_free"])
+        self._assert_wikipedia_export_rejects_altered_credit(content)
+
+    def _assert_saved_wikipedia_poster_survives_outage(self, source_response, image):
+        """Keep a saved poster during optional article lookup outages."""
+
+        def outage(url, params, **kwargs):
+            if url == "https://en.wikipedia.org/w/api.php":
+                raise requests.Timeout
+            return source_response(url, params, **kwargs)
+
+        cache.clear()
+        with patch("app.providers.services.session.get", side_effect=outage):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            )
+            self.assertContains(response, image)
+            details = self.client.get(
+                reverse(
+                    "media_details",
+                    args=["wikidata", "theater", "Q19320959", "hamilton"],
+                )
+            )
+            self.assertContains(details, image)
+        self.assertEqual(Item.objects.get(media_id="Q19320959").image, image)
+
+    def _assert_wikipedia_export_rejects_altered_credit(self, content):
+        """Omit altered article artwork without losing restored attendance."""
+        for key, value in (
+            ("non_free", False),
+            ("basis_notice", ""),
+            ("source_url", "javascript:alert(1)"),
+            ("article_url", "https://example.com"),
+        ):
+            with self.subTest(key=key):
+                rows = list(csv.DictReader(StringIO(content.decode())))
+                artwork = json.loads(rows[0]["theater_artwork"])
+                artwork[key] = value
+                rows[0]["theater_artwork"] = json.dumps(artwork)
+                upload = StringIO()
+                writer = csv.DictWriter(upload, fieldnames=rows[0].keys())
+                writer.writeheader()
+                writer.writerows(rows)
+                Item.objects.get(media_id="Q19320959").delete()
+                with patch(
+                    "app.providers.services.session.get",
+                    side_effect=AssertionError("Offline restore"),
+                ):
+                    self.client.post(
+                        reverse("import_yamtrack"),
+                        {
+                            "mode": "new",
+                            "yamtrack_csv": SimpleUploadedFile(
+                                "theater.csv", upload.getvalue().encode()
+                            ),
+                        },
+                    )
+                attendance = Theater.objects.get(user=self.user)
+                self.assertEqual(attendance.notes, "My visit")
+                self.assertFalse(attendance.item.theater_artwork)
+
+    def test_wikipedia_batches_preserve_valid_posters_when_another_file_is_invalid(
+        self,
+    ):
+        """A bad file cannot suppress another work's verified article image."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )["wikipedia"]
+        self.search_ids = ["Q19320959", "Q94000"]
+        for identifier, title in (
+            ("Q19320959", "Hamilton (musical)"),
+            ("Q94000", "Other musical"),
+        ):
+            self.entities[identifier] = {
+                **self.entities["Q19320959"],
+                "id": identifier,
+                "sitelinks": {"enwiki": {"title": title}},
+            }
+        calls = []
+
+        def source_response(url, params, **kwargs):
+            if url != "https://en.wikipedia.org/w/api.php":
+                return self.source_response(url, params, **kwargs)
+            calls.append(params)
+            if params["prop"] == "pageprops|pageimages|info":
+                pages = [
+                    fixture["article"],
+                    {
+                        **fixture["article"],
+                        "title": "Other musical",
+                        "pageprops": {"wikibase_item": "Q94000"},
+                        "pageimage": "Other.jpg",
+                    },
+                ]
+            else:
+                pages = [
+                    fixture["file"],
+                    {"title": "File:Other.jpg", "ns": 6, "imageinfo": None},
+                ]
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps({"query": {"pages": pages}}).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "musical"}
+            )
+        results = response.context["data"]["results"]
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            results[0]["item"]["image"], fixture["file"]["imageinfo"][0]["thumburl"]
+        )
+        self.assertFalse(results[0]["item"]["artwork_partial"])
+        self.assertTrue(results[1]["item"]["artwork_partial"])
+        self.assertEqual(len(calls), 2)
+        self.assertIn("Hamilton (musical)|Other musical", calls[0]["titles"])
+
+    def test_wikipedia_unavailable_and_rejected_metadata_never_hides_works(self):
+        """Reject wrong articles and unsafe files; retry incomplete source responses."""
+        original = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )["wikipedia"]
+        self.entities["Q19320959"]["sitelinks"] = {
+            "enwiki": {"title": "Hamilton (musical)"}
+        }
+        self.search_ids = ["Q19320959"]
+        fixture = original
+        mode = ""
+
+        def source_response(url, params, **kwargs):
+            if url != "https://en.wikipedia.org/w/api.php":
+                return self.source_response(url, params, **kwargs)
+            if mode == "timeout":
+                raise requests.Timeout
+            payload = {
+                "query": {
+                    "pages": [
+                        fixture["article"]
+                        if params["prop"] == "pageprops|pageimages|info"
+                        else fixture["file"]
+                    ]
+                }
+            }
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(None if mode == "null" else payload).encode()
+            return response
+
+        for case in (
+            "qid",
+            "disambiguation",
+            "unsafe_url",
+            "video",
+            "missing_metadata",
+            "timeout",
+            "null",
+        ):
+            with self.subTest(case=case):
+                cache.clear()
+                fixture = json.loads(json.dumps(original))
+                mode = case
+                if case == "qid":
+                    fixture["article"]["pageprops"]["wikibase_item"] = "Q999"
+                elif case == "disambiguation":
+                    fixture["article"]["pageprops"]["disambiguation"] = ""
+                elif case in ("unsafe_url", "video"):
+                    field, value = {
+                        "unsafe_url": ("thumburl", "https://example.com/poster.jpg"),
+                        "video": ("mime", "video/webm"),
+                    }[case]
+                    fixture["file"]["imageinfo"][0][field] = value
+                elif case == "missing_metadata":
+                    fixture["file"]["imageinfo"] = None
+                with patch(
+                    "app.providers.services.session.get", side_effect=source_response
+                ):
+                    response = self.client.get(
+                        reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.context["data"]["total_results"], 1)
+                    self.assertFalse(
+                        response.context["data"]["results"][0]["item"][
+                            "theater_artwork"
+                        ]
+                    )
+                    if case in ("timeout", "null", "missing_metadata"):
+                        mode, fixture = "", original
+                        recovered = self.client.get(
+                            reverse("search"),
+                            {"media_type": "theater", "q": "Hamilton"},
+                        )
+                        self.assertEqual(
+                            recovered.context["data"]["results"][0]["item"][
+                                "theater_artwork"
+                            ]["provider"],
+                            "wikipedia",
+                        )
+
+    def test_wikipedia_multilingual_shared_file_and_redirect_preserve_identity(self):
+        """Follow exact article redirects and shared files without title guesses."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )["wikipedia"]
+        self.entities["Q19320959"]["sitelinks"] = {
+            "enwiki": {"title": "Hamilton (musical)"},
+            "frwiki": {"title": "Hamilton ancien"},
+        }
+        self.search_ids = ["Q19320959"]
+        fixture["article"]["title"] = "Hamilton nouveau"
+        fixture["file"].update(imagerepository="shared", missing=True)
+        fixture["file"].pop("pageid")
+        fixture["file"].pop("lastrevid")
+        info = fixture["file"]["imageinfo"][0]
+        info.update(
+            thumburl="https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Hamilton-poster.jpg/250px-Hamilton-poster.jpg",
+            descriptionurl="https://commons.wikimedia.org/wiki/File:Hamilton-poster.jpg",
+        )
+        info["extmetadata"].update(
+            NonFree={"value": "false"}, LicenseShortName={"value": "CC BY-SA 4.0"}
+        )
+
+        def source_response(url, params, **kwargs):
+            if url == "https://en.wikipedia.org/w/api.php":
+                payload = {
+                    "query": {
+                        "pages": [{"title": "Hamilton (musical)", "missing": True}]
+                    }
+                }
+            elif url == "https://fr.wikipedia.org/w/api.php":
+                if params["prop"] == "pageprops|pageimages|info":
+                    payload = {
+                        "query": {
+                            "redirects": [
+                                {"from": "Hamilton ancien", "to": "Hamilton nouveau"}
+                            ],
+                            "pages": [fixture["article"]],
+                        }
+                    }
+                else:
+                    payload = {"query": {"pages": [fixture["file"]]}}
+            else:
+                return self.source_response(url, params, **kwargs)
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(payload).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            )
+        artwork = response.context["data"]["results"][0]["item"]["theater_artwork"]
+        self.assertEqual(artwork["language"], "fr")
+        self.assertFalse(artwork["non_free"])
+        self.assertEqual(artwork["work_id"], "Q19320959")
+        self.assertContains(response, "Hamilton_nouveau")
+        self.assertFalse(TheaterRedirect.objects.exists())
+        cache.clear()
+        fixture["file"].update(imagerepository="local", pageid=1000, lastrevid=100)
+        fixture["file"].pop("missing")
+        info["extmetadata"]["Artist"] = {
+            "value": '<a href="/wiki/Utilisateur:Photographe">Photographe</a>'
+        }
+        info.update(
+            thumburl="https://upload.wikimedia.org/wikipedia/fr/thumb/a/ab/Hamilton-poster.jpg/250px-Hamilton-poster.jpg",
+            descriptionurl="https://fr.wikipedia.org/wiki/Fichier:Hamilton-poster.jpg",
+        )
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            )
+        self.assertEqual(
+            response.context["data"]["results"][0]["item"]["image"], info["thumburl"]
+        )
+        self.assertContains(
+            response, "https://fr.wikipedia.org/wiki/Utilisateur:Photographe"
+        )
+
+    def test_wikipedia_article_failures_are_isolated_per_work(self):
+        """Malformed articles do not discard the valid neighbor in the same batch."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )["wikipedia"]
+        self.search_ids = ["Q19320959", "Q94000"]
+        for identifier, title in (
+            ("Q19320959", "Hamilton (musical)"),
+            ("Q94000", "Other"),
+        ):
+            self.entities[identifier] = {
+                **self.entities["Q19320959"],
+                "id": identifier,
+                "sitelinks": {"enwiki": {"title": title}},
+            }
+        bad_article = None
+
+        def source_response(url, params, **kwargs):
+            if url != "https://en.wikipedia.org/w/api.php":
+                return self.source_response(url, params, **kwargs)
+            pages = (
+                [fixture["article"], bad_article]
+                if params["prop"] == "pageprops|pageimages|info"
+                else [fixture["file"]]
+            )
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps({"query": {"pages": pages}}).encode()
+            return response
+
+        for changes in ({"pageprops": None}, {"pageimage": []}, {"pageprops": {}}):
+            cache.clear()
+            bad_article = {
+                **fixture["article"],
+                "title": "Other",
+                "pageprops": {"wikibase_item": "Q94000"},
+                **changes,
+            }
+            with patch(
+                "app.providers.services.session.get", side_effect=source_response
+            ):
+                response = self.client.get(
+                    reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                )
+            results = response.context["data"]["results"]
+            self.assertEqual(
+                results[0]["item"]["image"], fixture["file"]["imageinfo"][0]["thumburl"]
+            )
+            self.assertTrue(results[1]["item"]["artwork_unavailable"])
+
+    def test_wikipedia_site_batches_and_partial_fallback_preserve_saved_poster(self):
+        """Batch each site once and keep saved art when a preferred site fails."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )["wikipedia"]
+        self.search_ids = ["Q19320959", "Q94000"]
+        self.entities["Q19320959"]["sitelinks"] = {
+            "enwiki": {"title": "Hamilton (musical)"},
+            "frwiki": {"title": "Hamilton (musical)"},
+        }
+        self.entities["Q94000"] = {
+            **self.entities["Q19320959"],
+            "id": "Q94000",
+            "sitelinks": {"frwiki": {"title": "Other"}},
+        }
+        original_image = fixture["file"]["imageinfo"][0]["thumburl"]
+        saved = Item.objects.create(
+            media_id="Q19320959",
+            source="wikidata",
+            media_type="theater",
+            title="Hamilton",
+            image=original_image,
+            theater_forms=["musical"],
+            theater_artwork={"provider": "wikipedia", "image": original_image},
+        )
+        Theater.objects.create(item=saved, user=self.user, status="Planning")
+        french_calls = []
+
+        def source_response(url, params, **kwargs):
+            if url == "https://en.wikipedia.org/w/api.php":
+                raise requests.Timeout
+            if url != "https://fr.wikipedia.org/w/api.php":
+                return self.source_response(url, params, **kwargs)
+            french_calls.append(params)
+            if params["prop"] == "pageprops|pageimages|info":
+                pages = [
+                    {
+                        **fixture["article"],
+                        "title": title,
+                        "pageprops": {
+                            "wikibase_item": "Q94000"
+                            if title == "Other"
+                            else "Q19320959"
+                        },
+                    }
+                    for title in params["titles"].split("|")
+                ]
+            else:
+                file_page = json.loads(json.dumps(fixture["file"]))
+                file_page["imagerepository"] = "shared"
+                file_page["imageinfo"][0].update(
+                    thumburl="https://upload.wikimedia.org/wikipedia/commons/a/ab/fallback.jpg",
+                    descriptionurl="https://commons.wikimedia.org/wiki/File:Hamilton-poster.jpg",
+                )
+                pages = [file_page]
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps({"query": {"pages": pages}}).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            )
+        self.assertEqual(len(french_calls), 2)
+        self.assertEqual(
+            response.context["data"]["results"][0]["item"]["image"], original_image
+        )
+        self.assertEqual(
+            response.context["data"]["results"][1]["item"]["theater_artwork"][
+                "provider"
+            ],
+            "wikipedia",
+        )
+        saved.refresh_from_db()
+        self.assertEqual(saved.image, original_image)
+
     def test_missing_english_labels_use_source_language_without_changing_identity(self):
         """A work and its creator can display source labels when English is absent."""
         self.entities["Q105448367"] = {

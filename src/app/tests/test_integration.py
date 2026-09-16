@@ -197,6 +197,96 @@ class IntegrationTest(StaticLiveServerTestCase):
         finally:
             self.page.set_viewport_size({"width": 1280, "height": 720})
 
+    def test_theater_wikipedia_poster_search_to_library(self):
+        """Display exact-article posters and non-free credits on both sizes."""
+        fixture = json.loads(
+            (Path(__file__).parent / "mock_data/theater_artwork.json").read_text()
+        )
+        work = {
+            **fixture["work"],
+            "id": "Q19320959",
+            "labels": {"en": {"value": "Hamilton"}},
+            "sitelinks": {"enwiki": {"title": "Hamilton (musical)"}},
+        }
+        poster = fixture["wikipedia"]
+        image_url = poster["file"]["imageinfo"][0]["thumburl"]
+        image = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII="
+        )
+
+        def source_response(url, params, **_kwargs):
+            if url == "https://en.wikipedia.org/w/api.php":
+                payload = {
+                    "query": {
+                        "pages": [
+                            poster["article"]
+                            if params["prop"] == "pageprops|pageimages|info"
+                            else poster["file"]
+                        ]
+                    }
+                }
+            elif "commons.wikimedia.org" in url:
+                payload = {"query": {"search": []}}
+            elif params["action"] == "query":
+                payload = {"query": {"search": [{"title": "Q19320959"}]}}
+            else:
+                payload = {"entities": {"Q19320959": work}}
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(payload).encode()
+            return response
+
+        cache.clear()
+        self.page.route(
+            image_url, lambda route: route.fulfill(body=image, content_type="image/png")
+        )
+        try:
+            with patch(
+                "app.providers.services.session.get", side_effect=source_response
+            ):
+                for visit, width in enumerate((1280, 390)):
+                    self.page.set_viewport_size({"width": width, "height": 900})
+                    self.page.goto(
+                        f"{self.live_server_url}/search?media_type=theater&q=Hamilton"
+                    )
+                    picture = self.page.get_by_role("img", name="Hamilton", exact=True)
+                    expect(picture).to_have_attribute("src", image_url)
+                    expect(picture).to_have_js_property("naturalWidth", 1)
+                    expect(picture).to_have_css("object-fit", "contain")
+                    self.page.get_by_text("Image credit", exact=True).click()
+                    expect(
+                        self.page.get_by_text(
+                            "Non-free copyrighted artwork.", exact=False
+                        )
+                    ).to_be_visible()
+                    expect(
+                        self.page.get_by_role(
+                            "link", name="Wikipedia article", exact=True
+                        )
+                    ).to_be_visible()
+                    self.assertTrue(
+                        self.page.evaluate(
+                            "document.documentElement.scrollWidth <= innerWidth"
+                        )
+                    )
+                    self.page.get_by_title("Hamilton", exact=True).click()
+                    if visit == 0:
+                        self.page.get_by_role(
+                            "button", name="Add to tracker", exact=True
+                        ).click()
+                        self.page.get_by_label("Venue", exact=True).fill(
+                            "Local Theatre"
+                        )
+                        self.page.get_by_role("button", name="Add", exact=True).click()
+                    self.page.goto(f"{self.live_server_url}/test/theater")
+                    expect(
+                        self.page.get_by_role("img", name="Hamilton", exact=True)
+                    ).to_have_attribute("src", image_url)
+        finally:
+            self.page.unroute(image_url)
+            self.page.set_viewport_size({"width": 1280, "height": 720})
+            cache.clear()
+
     def test_theater_search_artwork_and_tracking(self):
         """Provider search and saved artwork retain readable credits on both sizes."""
         fixture = json.loads(

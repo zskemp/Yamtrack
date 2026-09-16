@@ -13,7 +13,7 @@ from django.utils.dateparse import parse_datetime
 import app
 from app import config, theater
 from app.models import MediaTypes, Sources
-from app.providers import commons, services
+from app.providers import commons, services, wikipedia
 from app.templatetags import app_tags
 from integrations.imports import helpers
 from integrations.imports.helpers import MediaImportError, MediaImportUnexpectedError
@@ -232,8 +232,14 @@ class YamtrackImporter:
         if row["source"] != Sources.WIKIDATA.value:
             return {}
         try:
-            artwork = commons.restored_artwork(
-                json.loads(row.get("theater_artwork") or "{}"),
+            record = json.loads(row.get("theater_artwork") or "{}")
+            restore = (
+                wikipedia.restored_artwork
+                if isinstance(record, dict) and record.get("provider") == "wikipedia"
+                else commons.restored_artwork
+            )
+            artwork = restore(
+                record,
                 row["media_id"],
                 row["image"],
             )

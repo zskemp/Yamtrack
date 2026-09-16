@@ -85,6 +85,48 @@ QID-only results.
 
 ## Artwork
 
+### Wikipedia Article Thumbnails
+
+Theater now prefers the representative image selected by the exact work's
+Wikipedia article, including non-free posters under the operator-selected policy.
+Wikidata sitelinks identify articles; the returned article must independently
+report the same QID and not be a disambiguation page. An article association is
+source evidence, not proof that every lead image is the ideal poster.
+
+Displayed works are batched by site, trying English then up to two other available
+sites from French, German, Spanish, Italian and Dutch. One article request and one
+file request per site obtain PageImages (`pilicense=any`) and current imageinfo.
+At most twelve calls are scheduled within twenty seconds, each waiting at most
+eight seconds. Commons fallback retains its own existing page budget. These are
+scheduling/network-wait bounds, not a guarantee against transport throttling.
+Only returned Wikimedia still-image thumbnails up to 300 pixels wide are used;
+no higher-resolution image or older upload is fetched. Files actually hosted by
+Commons are identified through the originating wiki's shared-repository metadata,
+not substituted solely because a Commons filename matches.
+
+Complete selections and confirmed absence cache for one hour, keyed by work
+revision and sitelinks. Incomplete per-work responses remain retryable without
+discarding successfully processed neighbors. Missing articles/images or rejected
+media fall back to the existing Commons resolver. Temporary Wikipedia failures
+preserve saved images/credits and prevent failed refreshes from persisting.
+Explicit metadata sync invalidates the Wikipedia selection cache.
+
+Credits retain the article, file, source rights fields, license link, retrieval
+time and file hash. Non-free images are explicitly labeled "Non-free; Wikipedia
+rationale", with a notice that Wikipedia's use-specific rationale is not a
+transferable license and does not establish fair use in another context or
+jurisdiction. API availability, attribution and reduced size do not by themselves
+establish a right to reuse. Operators remain responsible for their display policy;
+this implementation does not certify legal clearance or change image ownership.
+
+Own-data CSV exports retain source assertions and non-free status, not image bytes
+or a transferable fair-use license. Offline restore validates consistent source
+metadata and notices; altered records omit imagery without losing attendance.
+Known canonical redirects retain the original artwork evidence subject. Restore
+does not establish new global equivalence or independently authenticate an export.
+
+### Commons Fallback
+
 Commons images are eligible through a work's direct P18 image/P154 logo claim or verified
 exact-work P180 depiction statements. Enrichment runs only for the displayed
 page, not every candidate. Each work examines up to five direct files and, if

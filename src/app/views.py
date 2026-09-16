@@ -31,7 +31,7 @@ from app.models import (
     Status,
     UserMessage,
 )
-from app.providers import commons, manual, services, tmdb
+from app.providers import commons, manual, services, tmdb, wikipedia
 from app.templatetags import app_tags
 from events.models import Event
 from users.models import (
@@ -479,6 +479,7 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
     else:
         deleted = cache.delete(cache_key)
         cache.delete(f"commons_v{commons.POLICY_VERSION}_{media_id}")
+        wikipedia.invalidate(source, media_type, media_id)
         logger.debug("%s - Old cache deleted: %s", cache_key, deleted)
 
         metadata = services.get_media_metadata(

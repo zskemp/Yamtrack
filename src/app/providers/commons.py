@@ -141,11 +141,12 @@ STANDARD_RESTRICTIONS = {
 class CreditText(HTMLParser):
     """Preserve notice links as printable URLs without accepting executable HTML."""
 
-    def __init__(self):
+    def __init__(self, source_base="https://commons.wikimedia.org"):
         """Initialize plain text and nested link buffers."""
         super().__init__(convert_charrefs=True)
         self.parts = []
         self.links = []
+        self.source_base = source_base
 
     def handle_starttag(self, tag, attrs):
         """Retain safe notice links and block boundaries."""
@@ -154,7 +155,7 @@ class CreditText(HTMLParser):
             if target.startswith("//"):
                 target = "https:" + target
             if target.startswith("/"):
-                target = "https://commons.wikimedia.org" + target
+                target = self.source_base + target
             try:
                 parsed = urlsplit(target)
                 valid = (
@@ -180,11 +181,11 @@ class CreditText(HTMLParser):
         self.parts.append(data)
 
 
-def credit_text(value):
+def credit_text(value, *, source_base="https://commons.wikimedia.org"):
     """Convert credited HTML to escaped text while retaining supplied URLs."""
     if not isinstance(value, str):
         return str(value) if isinstance(value, (int, float, bool)) else ""
-    parser = CreditText()
+    parser = CreditText(source_base)
     parser.feed(value)
     return "".join(parser.parts).strip()
 

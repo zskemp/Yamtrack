@@ -9,7 +9,7 @@ from django.core.cache import cache
 from app import helpers
 from app import theater as theater_identity
 from app.models import MediaTypes, Sources, TheaterForms
-from app.providers import commons, services
+from app.providers import commons, services, wikipedia
 
 BASE_URL = "https://www.wikidata.org/w/api.php"
 FORM_IDS = {
@@ -92,7 +92,10 @@ def entities(identifiers):
             {
                 "action": "wbgetentities",
                 "ids": "|".join(batch),
-                "props": "info|labels|aliases|descriptions|claims",
+                "props": "info|labels|aliases|descriptions|claims|sitelinks",
+                "sitefilter": "|".join(
+                    language + "wiki" for language in wikipedia.LANGUAGES
+                ),
                 "languages": "en",
                 "languagefallback": 1,
                 "redirects": "yes",
@@ -322,6 +325,13 @@ def transform(entity, related):
         "work_revision": entity.get("lastrevid"),
         "classification_version": CLASSIFICATION_VERSION,
         "label_version": LABEL_VERSION,
+        "wikipedia_sitelinks": {
+            language: entity["sitelinks"][language + "wiki"]["title"]
+            for language in wikipedia.LANGUAGES
+            if isinstance(
+                entity.get("sitelinks", {}).get(language + "wiki", {}).get("title"), str
+            )
+        },
         "theater_forms": work_forms,
         "work_description": " / ".join([details["forms"], *dict.fromkeys(creators)]),
         "synopsis": entity.get("descriptions", {})
@@ -400,10 +410,10 @@ def hydrate(work_entities):
     ]
 
 
-def illustrate(work, *, prefer_posters=True):
+def illustrate(work, *, prefer_posters=True, article_artwork=None):
     """Attach image and credit together after work selection and pagination."""
     work = work.copy()
-    artwork = commons.artwork(
+    artwork = article_artwork or commons.artwork(
         work.pop("artwork_work_id", work["media_id"]),
         work.pop("artwork_candidates", []),
         work.get("work_revision"),
@@ -415,6 +425,7 @@ def illustrate(work, *, prefer_posters=True):
     work["artwork_partial"] = bool(artwork) and not artwork.get(
         "selection_complete", True
     )
+    work["wikipedia_version"] = wikipedia.VERSION
     if artwork and artwork["work_id"] != work["media_id"]:
         artwork = theater_identity.retarget_artwork(artwork, work["media_id"])
     work.update(
@@ -425,7 +436,6 @@ def illustrate(work, *, prefer_posters=True):
     return work
 
 
-@commons.request_budget()
 def theater(media_id):
     """Resolve a work identity and reject unsupported or ambiguous records."""
     if not re.fullmatch(r"Q[1-9][0-9]*", media_id):
@@ -438,6 +448,7 @@ def theater(media_id):
         and cached.get("artwork_policy") == commons.POLICY_VERSION
         and cached.get("classification_version") == CLASSIFICATION_VERSION
         and cached.get("label_version") == LABEL_VERSION
+        and cached.get("wikipedia_version") == wikipedia.VERSION
     ):
         return cached
     entity = entities([media_id]).get(media_id, {})
@@ -447,7 +458,16 @@ def theater(media_id):
             Sources.WIKIDATA.value, media_id, "theater work with a supported form"
         )
     theater_identity.record_redirect(media_id, entity)
-    result = illustrate(hydrate([entity])[0])
+    work = hydrate([entity])[0]
+    article_artwork = wikipedia.artworks([work])[work["media_id"]]
+    with commons.request_budget():
+        result = illustrate(work, article_artwork=article_artwork)
+    result["artwork_partial"] = result["artwork_partial"] or wikipedia.incomplete(
+        article_artwork
+    )
+    result["artwork_unavailable"] = result[
+        "artwork_unavailable"
+    ] or wikipedia.incomplete(article_artwork)
     if not any(
         result.get(key)
         for key in ("artwork_unavailable", "artwork_partial", "labels_incomplete")
@@ -475,11 +495,10 @@ def select_search_batch(params, selected, type_graph, *, optional=False):
     return data.get("continue", {})
 
 
-@commons.request_budget()
 def search(query, page):
     """Filter a bounded candidate window before canonical result pagination."""
     literal = " ".join(query.split())[:200]
-    key = f"wikidata_search_v11_{literal}"
+    key = f"wikidata_search_v12_{literal}"
     cached = cache.get(key)
     if cached is None:
         escaped = literal.replace("\\", "\\\\").replace('"', '\\"')
@@ -542,7 +561,26 @@ def search(query, page):
             canonical_results[canonical_id] = work
     results = list(canonical_results.values())
     displayed = results[(page - 1) * PAGE_SIZE : page * PAGE_SIZE]
-    illustrated = [illustrate(work, prefer_posters=False) for work in displayed]
+    article_artworks = wikipedia.artworks(displayed)
+    illustrated = illustrate_page(displayed, article_artworks)
+    response = helpers.format_search_response(
+        page, PAGE_SIZE, len(results), illustrated
+    )
+    response["limited"] = cached["limited"]
+    return response
+
+
+@commons.request_budget()
+def illustrate_page(displayed, article_artworks):
+    """Prioritize article images while retaining the separate Commons page budget."""
+    illustrated = [
+        illustrate(
+            work,
+            prefer_posters=False,
+            article_artwork=article_artworks[work["media_id"]],
+        )
+        for work in displayed
+    ]
     for index, work in enumerate(illustrated):
         artwork = work["theater_artwork"]
         if (
@@ -551,11 +589,10 @@ def search(query, page):
             and not artwork.get("poster_search_complete")
         ):
             illustrated[index] = illustrate(displayed[index])
-    response = helpers.format_search_response(
-        page,
-        PAGE_SIZE,
-        len(results),
-        illustrated,
-    )
-    response["limited"] = cached["limited"]
-    return response
+        illustrated[index]["artwork_partial"] = illustrated[index][
+            "artwork_partial"
+        ] or wikipedia.incomplete(article_artworks[work["media_id"]])
+        illustrated[index]["artwork_unavailable"] = illustrated[index][
+            "artwork_unavailable"
+        ] or wikipedia.incomplete(article_artworks[work["media_id"]])
+    return illustrated

@@ -9,6 +9,19 @@
       "P18": [{"mainsnak": {"datavalue": {"value": "Test stage photograph.jpg"}}}]
     }
   },
+  "wikipedia": {
+    "article": {"pageid": 45433681, "ns": 0, "title": "Hamilton (musical)", "lastrevid": 100,
+      "pageprops": {"wikibase_item": "Q19320959"}, "pageimage": "Hamilton-poster.jpg"},
+    "file": {"pageid": 55278676, "ns": 6, "title": "File:Hamilton-poster.jpg", "lastrevid": 101,
+      "imagerepository": "local", "imageinfo": [{
+        "thumburl": "https://upload.wikimedia.org/wikipedia/en/thumb/a/ab/Hamilton-poster.jpg/250px-Hamilton-poster.jpg",
+        "thumbwidth": 250, "thumbheight": 370, "width": 267, "height": 373,
+        "mime": "image/jpeg", "sha1": "poster-hash",
+        "descriptionurl": "https://en.wikipedia.org/wiki/File:Hamilton-poster.jpg",
+        "extmetadata": {"LicenseShortName": {"value": "Fair use"}, "NonFree": {"value": "true"},
+          "Copyrighted": {"value": "True"}, "UsageTerms": {"value": "Article fair use"}}
+      }]}
+  },
   "poster": {
     "pageid": 124,
     "lastrevid": 201,
