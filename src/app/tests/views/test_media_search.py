@@ -2060,6 +2060,107 @@ class TheaterDiscoveryTests(TestCase):
                 self.assertNotContains(response, image)
                 metadata[field]["value"] = original
 
+    def test_source_described_poster_beats_misleading_filename(self):
+        """Prefer an identified poster without changing its work or credit."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )
+        self.entities["Q822850"] = fixture["work"]
+        self.search_ids = ["Q822850"]
+        photograph = fixture["commons"]["query"]["pages"]["123"]
+        photograph["title"] = "File:Poster opening night.jpg"
+        photograph["imageinfo"][0]["extmetadata"]["ImageDescription"] = {
+            "value": "Photograph of the performance with a poster in the background"
+        }
+        poster = json.loads(json.dumps(photograph))
+        poster.update(pageid=124, title="File:Archive 1945.jpg")
+        poster_info = poster["imageinfo"][0]
+        poster_image = "https://thumb.wikimedia.org/wikipedia/commons/poster.png"
+        poster_info.update(
+            url=poster_image,
+            thumburl=poster_image,
+            descriptionurl="https://commons.wikimedia.org/wiki/File:Archive_1945.jpg",
+            width=700,
+            height=1000,
+        )
+        poster_info["extmetadata"].update(
+            ImageDescription={
+                "value": "<p>Poster for The House of Bernarda Alba, a play.</p>"
+            },
+            Artist={"value": "Poster Designer"},
+        )
+        fixture["commons"]["query"]["pages"]["124"] = poster
+        fixture["work"]["claims"]["P18"] = [
+            {"mainsnak": {"datavalue": {"value": page["title"].removeprefix("File:")}}}
+            for page in (photograph, poster)
+        ]
+
+        def source_response(url, params, **kwargs):
+            if "commons.wikimedia.org" not in url:
+                return self.source_response(url, params, **kwargs)
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(fixture["commons"]).encode()
+            return response
+
+        photograph_metadata = photograph["imageinfo"][0]["extmetadata"]
+        for description, object_titles, expected_page in (
+            ("<p>Poster for The House of Bernarda Alba, a play.</p>", None, poster),
+            (
+                '<a href="/wiki/Poster">Poster</a> for The House of Bernarda Alba',
+                None,
+                poster,
+            ),
+            (
+                (
+                    "Poster for The House of Bernarda Alba, a play. "
+                    "Advertisement for the original production."
+                ),
+                None,
+                poster,
+            ),
+            ("Poster designer at a performance of the play", None, photograph),
+            (
+                "Poster for a film adaptation of the play. Advertisement.",
+                None,
+                photograph,
+            ),
+            (
+                "Not a poster for the play, a photograph of its performance",
+                None,
+                photograph,
+            ),
+            ("", None, photograph),
+            ("", ("Stage photograph", "Production poster"), poster),
+        ):
+            with self.subTest(description=description, object_titles=object_titles):
+                poster_info["extmetadata"]["ImageDescription"]["value"] = description
+                if not description:
+                    photograph_metadata.pop("ImageDescription", None)
+                if object_titles:
+                    photograph_metadata["ObjectName"] = {"value": object_titles[0]}
+                    poster_info["extmetadata"]["ObjectName"] = {
+                        "value": object_titles[1]
+                    }
+                cache.clear()
+                with patch(
+                    "app.providers.services.session.get", side_effect=source_response
+                ):
+                    response = self.client.get(
+                        reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                    )
+                selected = response.context["data"]["results"][0]["item"]
+                expected_info = expected_page["imageinfo"][0]
+                self.assertEqual(selected["image"], expected_info["url"])
+                self.assertContains(response, expected_info["url"])
+                self.assertContains(
+                    response, expected_info["extmetadata"]["Artist"]["value"]
+                )
+                artwork = selected["theater_artwork"]
+                self.assertEqual(artwork["work_id"], "Q822850")
+                self.assertEqual(artwork["evidence"], "P18/P154")
+                self.assertEqual(artwork["source_url"], expected_info["descriptionurl"])
+
     def test_depiction_enrichment_requires_exact_work_and_safe_credits(self):
         """Commons matching rejects other adaptations and warning-tagged files."""
         fixture = json.loads(

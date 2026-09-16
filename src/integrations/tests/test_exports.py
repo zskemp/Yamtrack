@@ -38,7 +38,7 @@ class TheaterExportRestoreTest(TestCase):
         self.addCleanup(cache.clear)
 
     def test_older_pd_art_export_gains_caveat_without_losing_image(self):
-        """Valid policy-six credits are upgraded rather than discarded on restore."""
+        """Older credits retain images and gain any required reproduction caveat."""
         fixture = json.loads(
             (
                 Path(__file__).parents[2] / "app/tests/mock_data/theater_artwork.json"
@@ -73,30 +73,38 @@ class TheaterExportRestoreTest(TestCase):
         content = b"".join(self.client.get(reverse("export_csv")).streaming_content)
         rows = list(csv.DictReader(StringIO(content.decode())))
         artwork = json.loads(rows[0]["theater_artwork"])
-        artwork.update(policy=6, notices="")
-        rows[0]["theater_artwork"] = json.dumps(artwork)
-        legacy = StringIO()
-        writer = csv.DictWriter(legacy, fieldnames=rows[0].keys())
-        writer.writeheader()
-        writer.writerows(rows)
-        Item.objects.get(media_id="Q822850").delete()
-        with patch(
-            "app.providers.services.session.get",
-            side_effect=AssertionError("Restore must stay offline"),
-        ):
-            self.client.post(
-                reverse("import_yamtrack"),
-                {
-                    "mode": "new",
-                    "yamtrack_csv": SimpleUploadedFile(
-                        "legacy.csv", legacy.getvalue().encode()
-                    ),
-                },
-            )
-        restored = Item.objects.get(media_id="Q822850")
-        self.assertEqual(restored.image, artwork["image"])
-        self.assertIn("PD-Art", restored.theater_artwork["notices"])
-        self.assertEqual(restored.theater_artwork["artist"], "Test Photographer")
+        for policy, notices in ((6, ""), (8, artwork["notices"])):
+            with self.subTest(policy=policy):
+                legacy_artwork = {
+                    **artwork,
+                    "policy": policy,
+                    "notices": notices,
+                }
+                rows[0]["theater_artwork"] = json.dumps(legacy_artwork)
+                legacy = StringIO()
+                writer = csv.DictWriter(legacy, fieldnames=rows[0].keys())
+                writer.writeheader()
+                writer.writerows(rows)
+                Item.objects.get(media_id="Q822850").delete()
+                with patch(
+                    "app.providers.services.session.get",
+                    side_effect=AssertionError("Restore must stay offline"),
+                ):
+                    self.client.post(
+                        reverse("import_yamtrack"),
+                        {
+                            "mode": "new",
+                            "yamtrack_csv": SimpleUploadedFile(
+                                "legacy.csv", legacy.getvalue().encode()
+                            ),
+                        },
+                    )
+                restored = Item.objects.get(media_id="Q822850")
+                self.assertEqual(restored.image, artwork["image"])
+                self.assertIn("PD-Art", restored.theater_artwork["notices"])
+                self.assertEqual(
+                    restored.theater_artwork["artist"], "Test Photographer"
+                )
 
     def test_provider_artwork_round_trip_offline(self):
         """A licensed provider image keeps its credit through offline restore."""

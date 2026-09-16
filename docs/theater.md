@@ -119,7 +119,18 @@ require the actual rendered file-specific disclaimer, not just a generic license
 template link. Older CC-only exports retain their original grant/author checks;
 new public-domain exports require complete, consistent basis and notice evidence.
 Exact depiction candidates also require affirmative performance/illustration descriptions;
-advertisements, audiences, adaptations and isolated set designs are excluded.
+advertisements not explicitly described as work posters, audiences, adaptations
+and isolated set designs are excluded.
+
+Within each discovered candidate set, affirmative English "poster for/of"
+descriptions take priority over file/object-title poster hints; title hints apply
+only when a description is absent. Remaining ties prefer a 2:3 portrait ratio,
+then stable file ID. Incidental poster mentions do not establish poster preference.
+An explicitly described work poster may mention its advertisement purpose, but
+wrong-medium/adaptation and rights checks still apply. This ranking adds no HTTP
+requests and does not search additional sources once qualified candidates exist.
+Selection caches refresh with policy version 9; valid version-8 exports remain
+restorable without a provider request.
 
 Images use returned thumbnails without cropping. Image credit controls accompany
 search, details, library, home, history and list covers, preserving title, artist,

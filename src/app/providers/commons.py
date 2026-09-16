@@ -23,7 +23,7 @@ from app.providers import services
 
 logger = logging.getLogger(__name__)
 BASE_URL = "https://commons.wikimedia.org/w/api.php"
-POLICY_VERSION = 8
+POLICY_VERSION = 9
 LEGACY_POLICY_VERSION = 3
 PD_ART_NOTICE_POLICY_VERSION = 8
 MIN_IMAGE_DIMENSION = 200
@@ -344,6 +344,7 @@ def qualified_image(page):
         "image": image_url,
         "source_url": source_url,
         "title": value.get("ObjectName") or page["title"].removeprefix("File:"),
+        "description": text(metadata.get("ImageDescription", {}).get("value", "")),
         "artist": artist,
         "credit": value.get("Credit", ""),
         "attribution": value.get("Attribution", ""),
@@ -456,6 +457,7 @@ def complete_credit(artwork):
         5,
         6,
         7,
+        8,
         POLICY_VERSION,
     }:
         return False
@@ -661,14 +663,29 @@ def artwork(work_id, filenames, revision, work_forms=(), *, category_context=Non
         return None
 
 
+def described_poster(description):
+    """Recognize affirmative poster descriptions, not incidental poster mentions."""
+    return bool(
+        re.match(
+            r"^(?:(?:a|the)\s+)?poster\s+(?:for|of)\b",
+            description.strip(),
+            re.IGNORECASE,
+        )
+    )
+
+
 def suitable_for_work(page, work_forms, *, enrichment=False):
     """Reject explicit adaptation/form conflicts independently of image rights."""
     info = next(iter(page.get("imageinfo", [])), {})
     description = text(
         info.get("extmetadata", {}).get("ImageDescription", {}).get("value", "")
     ).casefold()
+    if re.search(r"\badvertisement\b", description) and not described_poster(
+        description
+    ):
+        return False
     if re.search(
-        r"\b(advertisement|audience|coin|rewrite|parody|adaptation|"
+        r"\b(audience|coin|rewrite|parody|adaptation|"
         r"stage set|set design|front stage|film)\b",
         description,
     ):
@@ -885,6 +902,24 @@ def depiction_candidates(work_id, work_forms):
         return [], True
 
 
+def artwork_preference(candidate):
+    """Rank explicit poster descriptions ahead of title hints and portrait fit."""
+    description = candidate["description"].strip()
+    if described_poster(description):
+        poster_rank = 0
+    elif not description and re.search(
+        r"\bposter\b", candidate["title"].replace("_", " "), re.IGNORECASE
+    ):
+        poster_rank = 1
+    else:
+        poster_rank = 2
+    return (
+        poster_rank,
+        abs(candidate["width"] / candidate["height"] - 2 / 3),
+        candidate["page_id"],
+    )
+
+
 def select_artwork(work_id, filenames, revision, work_forms, category_context=None):
     """Select a reusable work image from at most five direct candidates."""
     filenames = list(
@@ -912,13 +947,7 @@ def select_artwork(work_id, filenames, revision, work_forms, category_context=No
         unavailable = unavailable or category_unavailable
     if not candidates and unavailable:
         raise ArtworkUnavailableError
-    candidates.sort(
-        key=lambda candidate: (
-            "poster" not in candidate["title"].casefold(),
-            abs(candidate["width"] / candidate["height"] - 2 / 3),
-            candidate["page_id"],
-        )
-    )
+    candidates.sort(key=artwork_preference)
     selected = candidates[0] if candidates else {}
     if selected:
         selected.update(
