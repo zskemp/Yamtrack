@@ -384,7 +384,7 @@ class TheaterDiscoveryTests(TestCase):
                 )
             self.client.get(reverse("search"), {"media_type": "theater", "q": "stage"})
             self.assertEqual(len(calls), 1)
-            cache.delete("commons_v11_Q822851")
+            cache.delete("commons_v12_Q822851")
             self.client.get(reverse("search"), {"media_type": "theater", "q": "stage"})
             self.assertEqual(len(calls), 2)
             self.assertEqual(calls[-1], "File:Stage 1.jpg")
@@ -1446,6 +1446,200 @@ class TheaterDiscoveryTests(TestCase):
                     expected_title,
                 )
         self.assertEqual([len(batch) for batch in label_batches], [50, 1])
+
+    def test_unknown_restored_ids_wait_for_verified_redirect(self):
+        """Keep unknown imported IDs until a provider redirect confirms identity."""
+        for identifier, notes in (
+            ("Q998", "First visit"),
+            ("Q19320959", "Second visit"),
+        ):
+            item = Item.objects.create(
+                media_id=identifier,
+                source="wikidata",
+                media_type="theater",
+                title="Hamilton",
+                image="",
+                theater_forms=["musical"],
+            )
+            Theater.objects.create(
+                item=item, user=self.user, status="Planning", notes=notes
+            )
+        content = b"".join(self.client.get(reverse("export_csv")).streaming_content)
+        Item.objects.filter(media_type="theater").delete()
+        with patch(
+            "app.providers.services.session.get",
+            side_effect=AssertionError("Restore must remain offline"),
+        ):
+            self.client.post(
+                reverse("import_yamtrack"),
+                {
+                    "mode": "new",
+                    "yamtrack_csv": SimpleUploadedFile("unknown.csv", content),
+                },
+            )
+        self.assertEqual(
+            set(
+                Item.objects.filter(media_type="theater").values_list(
+                    "media_id", flat=True
+                )
+            ),
+            {"Q998", "Q19320959"},
+        )
+        self.assertFalse(TheaterRedirect.objects.exists())
+        before = set(Theater.objects.filter(user=self.user).values_list("pk", "notes"))
+        self.assertEqual(
+            {notes for _identifier, notes in before}, {"First visit", "Second visit"}
+        )
+        cache.clear()
+        response = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+        )
+        self.assertEqual(len(response.context["data"]["results"]), 1)
+        self.assertEqual(
+            set(Theater.objects.filter(user=self.user).values_list("pk", "notes")),
+            before,
+        )
+        self.assertEqual(Item.objects.filter(media_type="theater").count(), 1)
+        self.assertEqual(
+            TheaterRedirect.objects.get(alias_id="Q998").canonical_id, "Q19320959"
+        )
+
+    def test_wikipedia_person_only_image_keeps_work_visible(self):
+        """Article membership does not make a creator headshot work artwork."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )["wikipedia"]
+        self.search_ids = ["Q19320959"]
+        self.entities["Q19320959"]["sitelinks"] = {
+            "enwiki": {"title": "Hamilton (musical)"}
+        }
+        metadata = fixture["file"]["imageinfo"][0]["extmetadata"]
+        metadata.update(
+            ObjectName={"value": "Akram Khan"},
+            Categories={"value": "Akram Khan (dancer)|CC-BY-SA-4.0"},
+            ImageDescription={
+                "value": "Akram Khan at Jerwood Space in London, England in April 2010."
+            },
+        )
+
+        def source_response(url, params, **kwargs):
+            if "wikipedia.org/w/api.php" not in url:
+                return self.source_response(url, params, **kwargs)
+            response = requests.Response()
+            response.status_code = 200
+            page = (
+                fixture["article"]
+                if params["prop"] == "pageprops|pageimages|info"
+                else fixture["file"]
+            )
+            response._content = json.dumps({"query": {"pages": [page]}}).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            )
+            item = response.context["data"]["results"][0]["item"]
+            self.assertEqual(item["title"], "Hamilton")
+            self.assertFalse(item["theater_artwork"])
+            metadata["ImageDescription"]["value"] = (
+                "Akram Khan performing in the production"
+            )
+            cache.clear()
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            )
+            self.assertTrue(
+                response.context["data"]["results"][0]["item"]["theater_artwork"]
+            )
+
+    def test_creator_portraits_do_not_illustrate_theater_works(self):
+        """Person-only photographs are not a substitute for work artwork."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )
+        self.entities["Q822850"] = fixture["work"]
+        self.search_ids = ["Q822850"]
+        page = fixture["commons"]["query"]["pages"]["123"]
+        page["categories"] = [{"title": "Category:Akram Khan (dancer)"}]
+        info = page["imageinfo"][0]
+        info["extmetadata"]["ObjectName"] = {"value": "Akram Khan"}
+
+        def source_response(url, params, **kwargs):
+            if "commons.wikimedia.org" not in url:
+                return self.source_response(url, params, **kwargs)
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(fixture["commons"]).encode()
+            return response
+
+        cases = (
+            ("Akram Khan at Jerwood Space in London, England in April 2010.", False),
+            ("Portrait of the choreographer", False),
+            ("Headshot of the author", False),
+            ("Akram Khan performing in the play", True),
+            ("Portrait of the actor as the title character in the play", True),
+            ("Portrait of the actor as Hamlet", True),
+            ("Portrait of the dancer as Odette", True),
+            ("Poster for the play featuring its author", True),
+        )
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            for description, accepted in cases:
+                with self.subTest(description=description):
+                    cache.clear()
+                    info["extmetadata"]["ImageDescription"] = {"value": description}
+                    response = self.client.get(
+                        reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                    )
+                    result = response.context["data"]["results"][0]["item"]
+                    self.assertEqual(bool(result["theater_artwork"]), accepted)
+                    self.assertEqual(result["media_id"], "Q822850")
+
+    def test_explicit_venue_and_staging_evidence_cannot_become_works(self):
+        """Source-described venues and performances are not underlying works."""
+        cases = [
+            ("A performing arts center in Hoan Kiem Ward", {}, False),
+            ("ballet performance at Herodeion, Athens, 2017", {}, False),
+            (
+                "play by William Shakespeare",
+                {
+                    "P57": "Q1782343",
+                    "P655": "Q373167",
+                    "P144": "Q41567",
+                },
+                False,
+            ),
+            ("musical set in a performing arts center", {}, True),
+            ("ballet", {"P144": "Q41567", "P1809": "Q1782343"}, True),
+            ("play", {"P655": "Q373167", "P144": "Q41567"}, True),
+        ]
+        self.search_ids = ["Q19320959"]
+        for description, references, accepted in cases:
+            with self.subTest(description=description, references=references):
+                cache.clear()
+                work = json.loads(json.dumps(self.entities["Q998"]))
+                work.pop("redirects", None)
+                work["descriptions"] = {"en": {"value": description}}
+                for prop, identifier in references.items():
+                    work["claims"][prop] = [
+                        {"mainsnak": {"datavalue": {"value": {"id": identifier}}}}
+                    ]
+                self.entities["Q19320959"] = work
+                response = self.client.get(
+                    reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                )
+                self.assertEqual(bool(response.context["data"]["results"]), accepted)
+                if not accepted:
+                    self.client.post(
+                        reverse("media_save"),
+                        {
+                            "media_id": "Q19320959",
+                            "source": "wikidata",
+                            "media_type": "theater",
+                            "status": "Planning",
+                        },
+                    )
+                    self.assertFalse(Theater.objects.filter(user=self.user).exists())
 
     def test_mixed_stage_work_remains_discoverable_without_staging_fingerprint(self):
         """A directly classified musical/work remains trackable with a mixed type."""

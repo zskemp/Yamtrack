@@ -47,7 +47,7 @@ CREATOR_ROLES = {
 }
 PAGE_SIZE = 20
 MAX_BATCHES = 3
-CLASSIFICATION_VERSION = 5
+CLASSIFICATION_VERSION = 6
 CLASS_DEPTH_LIMIT = 3
 CLASS_COUNT_LIMIT = 50
 LABEL_VERSION = 1
@@ -224,6 +224,8 @@ def forms(entity):
     """Require explicit work form evidence without guessing unresolved forms."""
     if "missing" in entity:
         return []
+    if describes_non_work(entity):
+        return []
     types = type_evidence(entity, "P31")
     if has_type_conflict(entity):
         return []
@@ -243,6 +245,21 @@ def forms(entity):
         )
     named_forms = [form for form in classified if form != "other"]
     return list(dict.fromkeys(named_forms or classified))
+
+
+def describes_non_work(entity):
+    """Reject explicit venue/event descriptions and corroborated staging records."""
+    description = entity.get("descriptions", {}).get("en", {}).get("value", "")
+    if re.match(
+        r"^(?:an? |the )?(?:performing arts (?:cent(?:er|re)|venue)|"
+        r"theat(?:er|re) (?:building|company)|"
+        r"(?:ballet|opera|musical|theatrical) "
+        r"(?:performance|production) (?:at|in|of))\b",
+        description.strip(),
+        re.IGNORECASE,
+    ):
+        return True
+    return all(values(entity, prop) for prop in ("P57", "P655", "P144"))
 
 
 def label(entity):
@@ -497,7 +514,7 @@ def select_search_batch(params, selected, type_graph, *, optional=False):
 def search(query, page):
     """Filter a bounded candidate window before canonical result pagination."""
     literal = " ".join(query.split())[:200]
-    key = f"wikidata_search_v12_{literal}"
+    key = f"wikidata_search_v13_{literal}"
     cached = cache.get(key)
     if cached is None:
         escaped = literal.replace("\\", "\\\\").replace('"', '\\"')

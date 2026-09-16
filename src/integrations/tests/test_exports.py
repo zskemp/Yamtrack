@@ -205,6 +205,8 @@ class TheaterExportRestoreTest(TestCase):
             (9, artwork["notices"], True),
             (10, artwork["notices"], True),
             (10, artwork["notices"], False),
+            (11, artwork["notices"], True),
+            (11, artwork["notices"], False),
         ):
             with self.subTest(policy=policy, supports_cc=supports_cc):
                 legacy_artwork = {

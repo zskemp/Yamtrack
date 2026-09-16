@@ -24,7 +24,7 @@ from app.providers import services
 
 logger = logging.getLogger(__name__)
 BASE_URL = "https://commons.wikimedia.org/w/api.php"
-POLICY_VERSION = 11
+POLICY_VERSION = 12
 LEGACY_POLICY_VERSION = 3
 PD_ART_NOTICE_POLICY_VERSION = 8
 MIN_IMAGE_DIMENSION = 200
@@ -483,6 +483,7 @@ def complete_credit(artwork):
         8,
         9,
         10,
+        11,
         POLICY_VERSION,
     }:
         return False
@@ -794,12 +795,55 @@ def described_poster(description):
     )
 
 
+def unrelated_portrait(page):
+    """Identify person-only images while allowing explicit stage/character context."""
+    info = next(iter(page.get("imageinfo", [])), {})
+    metadata = info.get("extmetadata", {})
+    source_description = text(metadata.get("ImageDescription", {}).get("value", ""))
+    description = source_description.casefold()
+    if re.search(
+        r"\b(?i:actor|actress|dancer)(?: [\w'-]+){0,4} as [A-Z][\w'-]*\b",
+        source_description,
+    ):
+        return False
+    if re.search(
+        r"\b(?:performing|performance|production|poster|in character|"
+        r"as (?:the |a )?[^.]*character|in the role of)\b",
+        description,
+    ):
+        return False
+    if re.match(
+        r"^(?:a |the )?(?:portrait|headshot) of (?:the |an? )?(?:author|"
+        r"composer|choreographer|actor|actress|dancer|playwright)\b",
+        description,
+    ):
+        return True
+    subject = text(metadata.get("ObjectName", {}).get("value", "")).casefold()
+    categories = [entry.get("title", "") for entry in page.get("categories", [])]
+    categories.extend(metadata.get("Categories", {}).get("value", "").split("|"))
+    person_category = any(
+        re.fullmatch(
+            re.escape(subject)
+            + r" \((?:dancer|choreographer|actor|actress|composer|playwright|writer)\)",
+            category.casefold().removeprefix("category:"),
+        )
+        for category in categories
+    )
+    return bool(
+        subject
+        and person_category
+        and re.match(re.escape(subject) + r" (?:at|in)\b", description)
+    )
+
+
 def suitable_for_work(page, work_forms, *, enrichment=False):
     """Reject explicit adaptation/form conflicts independently of image rights."""
     info = next(iter(page.get("imageinfo", [])), {})
     description = text(
         info.get("extmetadata", {}).get("ImageDescription", {}).get("value", "")
     ).casefold()
+    if unrelated_portrait(page):
+        return False
     if re.search(r"\badvertisement\b", description) and not described_poster(
         description
     ):

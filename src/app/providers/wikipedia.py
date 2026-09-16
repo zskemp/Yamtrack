@@ -37,7 +37,7 @@ class UnavailableError(Exception):
 
 def cache_key(work_id):
     """Identify the cached article selection for a canonical work."""
-    return f"wikipedia_artwork_v{VERSION}_{work_id}"
+    return f"wikipedia_artwork_v{VERSION}_subject1_{work_id}"
 
 
 def invalidate(source, media_type, work_id):
@@ -172,6 +172,7 @@ def build_artwork(work_id, language, article, file_page):
         or "badfile" in info
         or rights.get("DeletionReason")
         or not rights.get("LicenseShortName")
+        or commons.unrelated_portrait(file_page)
     ):
         return {}
     non_free = (
