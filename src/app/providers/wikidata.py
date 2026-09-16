@@ -82,7 +82,7 @@ def request_data(params):
     return data
 
 
-def entities(identifiers):
+def entities(identifiers, *, props="info|labels|aliases|descriptions|claims|sitelinks"):
     """Read public entities in supported batches, following provider redirects."""
     identifiers = list(dict.fromkeys(identifiers))
     result = {}
@@ -92,7 +92,7 @@ def entities(identifiers):
             {
                 "action": "wbgetentities",
                 "ids": "|".join(batch),
-                "props": "info|labels|aliases|descriptions|claims|sitelinks",
+                "props": props,
                 "sitefilter": "|".join(
                     language + "wiki" for language in wikipedia.LANGUAGES
                 ),
@@ -165,7 +165,7 @@ def classify_entities(work_entities, graph):
                 uncached.append(identifier)
             else:
                 graph[identifier] = cached
-        fetched = entities(uncached)
+        fetched = entities(uncached, props="info|claims")
         for identifier in uncached:
             entity = fetched.get(identifier, {"missing": ""})
             record = {
@@ -402,7 +402,7 @@ def hydrate(work_entities):
         for property_id in [*CREATOR_ROLES, "P364"]
         for identifier in identifiers(entity, property_id)
     ]
-    related = entities(references)
+    related = entities(references, props="labels|aliases")
     incomplete = hydrate_labels([*work_entities, *related.values()])
     return [
         {**transform(entity, related), "labels_incomplete": incomplete}

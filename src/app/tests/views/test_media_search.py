@@ -218,6 +218,92 @@ class TheaterDiscoveryTests(TestCase):
         response._content = json.dumps(data).encode()
         return response
 
+    def test_wikidata_requests_only_fields_needed_for_related_entities(self):
+        """Slim type and creator records preserve work metadata and label fallback."""
+        work = self.entities["Q19320959"]
+        work["claims"]["P31"] = [
+            {"mainsnak": {"datavalue": {"value": {"id": "Q90001"}}}}
+        ]
+        work["claims"]["P364"] = [
+            {"mainsnak": {"datavalue": {"value": {"id": "Q90002"}}}}
+        ]
+        self.entities["Q90001"] = {
+            "id": "Q90001",
+            "lastrevid": 123,
+            "claims": {
+                "P279": [{"mainsnak": {"datavalue": {"value": {"id": "Q2743"}}}}]
+            },
+        }
+        self.entities["Q90002"] = {
+            "id": "Q90002",
+            "labels": {"nl": {"value": "Nederlands"}},
+        }
+        self.entities["Q1646482"]["aliases"] = {"en": [{"value": "Lin Manuel Miranda"}]}
+        self.search_ids = ["Q19320959"]
+        calls = []
+
+        def source_response(url, params, **kwargs):
+            response = self.source_response(url, params, **kwargs)
+            if params["action"] != "wbgetentities":
+                return response
+            identifiers = set(params["ids"].split("|"))
+            props = params["props"]
+            calls.append((identifiers, props))
+            expected = {
+                frozenset({"Q90001"}): "info|claims",
+                frozenset({"Q1646482", "Q90002"}): "labels|aliases",
+                frozenset(
+                    {"Q19320959"}
+                ): "info|labels|aliases|descriptions|claims|sitelinks",
+                frozenset({"Q90002"}): "labels",
+            }
+            self.assertEqual(props, expected[frozenset(identifiers)])
+            payload = response.json()
+            for entity in payload["entities"].values():
+                for field in (
+                    "labels",
+                    "aliases",
+                    "claims",
+                    "descriptions",
+                    "sitelinks",
+                ):
+                    if field not in props.split("|"):
+                        entity.pop(field, None)
+                if "info" not in props.split("|"):
+                    entity.pop("lastrevid", None)
+                if params.get("languages") == "en":
+                    entity["labels"] = {
+                        language: label
+                        for language, label in entity.get("labels", {}).items()
+                        if language == "en"
+                    }
+            response._content = json.dumps(payload).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            )
+            item = response.context["data"]["results"][0]["item"]
+            self.assertEqual(item["title"], "Hamilton")
+            self.assertEqual(item["theater_forms"], ["musical"])
+            self.assertEqual(item["synopsis"], "stage musical")
+            self.assertEqual(item["details"]["Composers"], "Lin-Manuel Miranda")
+            self.assertEqual(item["details"]["original_language"], "Nederlands")
+            self.assertIn(
+                "Lin Manuel Miranda", item["artwork_category_context"]["creators"]
+            )
+            self.assertFalse(item["labels_incomplete"])
+            self.assertIn(({"Q90002"}, "labels"), calls)
+            cache.clear()
+            details = self.client.get(
+                reverse(
+                    "media_details",
+                    args=["wikidata", "theater", "Q19320959", "hamilton"],
+                )
+            )
+            self.assertContains(details, "Lin-Manuel Miranda")
+
     def test_missing_direct_image_never_searches_commons(self):
         """Keep imageless works visible without exploratory image requests."""
 
