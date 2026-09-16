@@ -218,6 +218,370 @@ class TheaterDiscoveryTests(TestCase):
         response._content = json.dumps(data).encode()
         return response
 
+    def test_specific_source_types_resolve_without_crossing_work_boundaries(self):
+        """Recognize specific stage works while excluding production subclasses."""
+        classes = {
+            "Q90001": ["Q1344"],
+            "Q90002": ["Q7777570"],
+            "Q90003": ["Q2743"],
+            "Q2743": ["Q25379"],
+            "Q58483083": ["Q7777570"],
+        }
+        for identifier, parents in classes.items():
+            self.entities[identifier] = {
+                "id": identifier,
+                "lastrevid": 100,
+                "claims": {
+                    "P279": [
+                        {"mainsnak": {"datavalue": {"value": {"id": parent}}}}
+                        for parent in parents
+                    ]
+                },
+            }
+        for identifier, title, type_id in [
+            ("Q91001", "Regional Opera", "Q90001"),
+            ("Q91002", "Regional Production", "Q90002"),
+            ("Q91003", "Regional Musical", "Q90003"),
+        ]:
+            self.entities[identifier] = {
+                "id": identifier,
+                "labels": {"en": {"value": title}},
+                "claims": {
+                    "P31": [{"mainsnak": {"datavalue": {"value": {"id": type_id}}}}]
+                },
+            }
+        self.entities["Q91002"]["claims"]["P7937"] = [
+            {"mainsnak": {"datavalue": {"value": {"id": "Q2743"}}}},
+        ]
+        self.search_ids = ["Q91001", "Q91002", "Q91003", "Q19320959"]
+        response = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "Regional"}
+        )
+        works = {
+            result["item"]["media_id"]: result["item"]
+            for result in response.context["data"]["results"]
+        }
+        self.assertEqual(set(works), {"Q91001", "Q91003", "Q19320959"})
+        self.assertEqual(works["Q91001"]["theater_forms"], ["opera"])
+        self.assertEqual(works["Q91003"]["theater_forms"], ["musical"])
+        self.client.post(
+            reverse("media_save"),
+            {
+                "media_id": "Q91001",
+                "source": "wikidata",
+                "media_type": "theater",
+                "status": "Planning",
+            },
+        )
+        self.assertEqual(Item.objects.get(media_id="Q91001").theater_forms, ["opera"])
+
+    def test_explicit_ballet_survives_unresolved_secondary_work_types(self):
+        """Swan Lake's broad musical-work ancestry cannot erase its Ballet type."""
+        self.entities["Q199786"] = {
+            "id": "Q199786",
+            "lastrevid": 2526633021,
+            "labels": {"en": {"value": "Swan Lake"}},
+            "claims": {
+                "P31": [
+                    {"mainsnak": {"datavalue": {"value": {"id": identifier}}}}
+                    for identifier in [
+                        "Q58483083",
+                        "Q58483088",
+                        "Q15079786",
+                        "Q105543609",
+                    ]
+                ]
+            },
+        }
+        self.search_ids = ["Q199786"]
+        response = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "Swan Lake"}
+        )
+        self.assertContains(response, "Swan Lake")
+        self.assertEqual(
+            response.context["data"]["results"][0]["item"]["theater_forms"], ["ballet"]
+        )
+
+    def test_unresolved_type_graphs_never_guess_work_forms(self):
+        """Cycles, excessive ancestry and production conflicts remain untrackable."""
+        classes = {
+            "Q92001": ["Q92002"],
+            "Q92002": ["Q92001"],
+            "Q92003": ["Q1344", "Q7777570"],
+            "Q92004": ["Q92005"],
+            "Q92005": ["Q92006"],
+            "Q92006": ["Q92007"],
+            "Q92007": ["Q1344"],
+        }
+        for identifier, parents in classes.items():
+            self.entities[identifier] = {
+                "id": identifier,
+                "lastrevid": 100,
+                "claims": {
+                    "P279": [
+                        {"mainsnak": {"datavalue": {"value": {"id": parent}}}}
+                        for parent in parents
+                    ],
+                },
+            }
+        self.search_ids = ["Q19320959"]
+        for number, type_id in enumerate(
+            ["Q92001", "Q92003", "Q92004", "Q92999"], start=93000
+        ):
+            identifier = f"Q{number}"
+            self.entities[identifier] = {
+                "id": identifier,
+                "labels": {"en": {"value": "Unresolved work"}},
+                "claims": {
+                    "P31": [{"mainsnak": {"datavalue": {"value": {"id": type_id}}}}],
+                    "P7937": [{"mainsnak": {"datavalue": {"value": {"id": "Q1344"}}}}],
+                },
+            }
+            self.search_ids.append(identifier)
+        response = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "work"}
+        )
+        self.assertEqual(
+            [
+                entry["item"]["media_id"]
+                for entry in response.context["data"]["results"]
+            ],
+            ["Q19320959"],
+        )
+        for identifier in self.search_ids[1:]:
+            response = self.client.post(
+                reverse("media_save"),
+                {
+                    "media_id": identifier,
+                    "source": "wikidata",
+                    "media_type": "theater",
+                    "status": "Planning",
+                },
+            )
+            self.assertEqual(response.status_code, 500)
+        self.assertFalse(Item.objects.filter(media_type="theater").exists())
+
+    def test_label_fallback_finds_specific_subtype_after_filtered_search_misses(self):
+        """An ordinary alias query can discover a work with only a specific class."""
+        self.entities["Q94001"] = {
+            "id": "Q94001",
+            "lastrevid": 100,
+            "claims": {
+                "P279": [{"mainsnak": {"datavalue": {"value": {"id": "Q1344"}}}}]
+            },
+        }
+        self.entities["Q94002"] = {
+            "id": "Q94002",
+            "labels": {"en": {"value": "Regional Opera"}},
+            "claims": {
+                "P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q94001"}}}}]
+            },
+        }
+        self.search_ids = ["Q94002", "Q999"]
+
+        def source_response(url, params, **kwargs):
+            if (
+                url == "https://www.wikidata.org/w/api.php"
+                and "haswbstatement" in params.get("srsearch", "")
+            ):
+                response = requests.Response()
+                response.status_code = 200
+                response._content = b'{"query":{"search":[]}}'
+                return response
+            return self.source_response(url, params, **kwargs)
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Local alias"}
+            )
+        self.assertContains(response, "Regional Opera")
+        self.assertNotContains(response, "Hamilton film")
+        self.assertEqual(response.context["data"]["total_results"], 1)
+
+    def test_type_budget_is_shared_across_provider_pages(self):
+        """Later result pages cannot reset the bounded class lookup budget."""
+        self.search_ids = []
+        for number in range(60):
+            identifier, type_id = f"Q{95000 + number}", f"Q{96000 + number}"
+            self.entities[type_id] = {
+                "id": type_id,
+                "lastrevid": 100,
+                "claims": {
+                    "P279": [{"mainsnak": {"datavalue": {"value": {"id": "Q1344"}}}}],
+                },
+            }
+            self.entities[identifier] = {
+                "id": identifier,
+                "labels": {"en": {"value": f"Opera {number}"}},
+                "claims": {
+                    "P31": [{"mainsnak": {"datavalue": {"value": {"id": type_id}}}}],
+                },
+            }
+            self.search_ids.append(identifier)
+        requested_classes = set()
+
+        def source_response(url, params, **kwargs):
+            if "wikidata.org" in url and params.get("action") == "query":
+                offset = params.get("sroffset", 0)
+                payload = {
+                    "query": {
+                        "search": [
+                            {"title": identifier}
+                            for identifier in self.search_ids[offset : offset + 30]
+                        ]
+                    }
+                }
+                if not offset:
+                    payload["continue"] = {"sroffset": 30, "continue": "-||"}
+                response = requests.Response()
+                response.status_code = 200
+                response._content = json.dumps(payload).encode()
+                return response
+            requested_classes.update(
+                identifier
+                for identifier in params.get("ids", "").split("|")
+                if identifier.startswith("Q96")
+            )
+            return self.source_response(url, params, **kwargs)
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Opera"}
+            )
+        self.assertEqual(len(requested_classes), 50)
+        self.assertEqual(response.context["data"]["total_results"], 50)
+        self.assertEqual(response.context["data"]["total_pages"], 3)
+        self.assertContains(response, "Search limit reached")
+
+    def test_deprecated_class_parents_do_not_establish_stage_form(self):
+        """Discard deprecated ancestry rather than inheriting a former form."""
+        self.entities["Q97001"] = {
+            "id": "Q97001",
+            "lastrevid": 100,
+            "claims": {
+                "P279": [
+                    {
+                        "rank": "deprecated",
+                        "mainsnak": {"datavalue": {"value": {"id": "Q1344"}}},
+                    }
+                ],
+            },
+        }
+        self.entities["Q97002"] = {
+            "id": "Q97002",
+            "labels": {"en": {"value": "Former opera"}},
+            "claims": {
+                "P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q97001"}}}}],
+            },
+        }
+        self.search_ids = ["Q19320959", "Q97002"]
+        response = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "Opera"}
+        )
+        self.assertEqual(
+            [
+                entry["item"]["media_id"]
+                for entry in response.context["data"]["results"]
+            ],
+            ["Q19320959"],
+        )
+
+    def test_later_batches_expand_already_loaded_class_ancestors(self):
+        """Shared lookup caching must not change depth-relative classification."""
+        for identifier, parent in [
+            ("Q99001", "Q99002"),
+            ("Q99002", "Q99003"),
+            ("Q99003", "Q99004"),
+            ("Q99004", "Q1344"),
+        ]:
+            self.entities[identifier] = {
+                "id": identifier,
+                "lastrevid": 100,
+                "claims": {
+                    "P279": [{"mainsnak": {"datavalue": {"value": {"id": parent}}}}],
+                },
+            }
+        for identifier, type_id in [("Q99101", "Q99001"), ("Q99102", "Q99002")]:
+            self.entities[identifier] = {
+                "id": identifier,
+                "labels": {"en": {"value": "Regional work"}},
+                "claims": {
+                    "P31": [{"mainsnak": {"datavalue": {"value": {"id": type_id}}}}],
+                },
+            }
+
+        def source_response(url, params, **kwargs):
+            if "wikidata.org" in url and params.get("action") == "query":
+                later = "sroffset" in params
+                payload = {
+                    "query": {"search": [{"title": "Q99102" if later else "Q99101"}]}
+                }
+                if not later:
+                    payload["continue"] = {"sroffset": 1, "continue": "-||"}
+                response = requests.Response()
+                response.status_code = 200
+                response._content = json.dumps(payload).encode()
+                return response
+            return self.source_response(url, params, **kwargs)
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Regional"}
+            )
+            self.assertEqual(
+                [
+                    entry["item"]["media_id"]
+                    for entry in response.context["data"]["results"]
+                ],
+                ["Q99102"],
+            )
+            self.entities["Q99004"]["claims"]["P279"][0]["mainsnak"]["datavalue"][
+                "value"
+            ]["id"] = "Q7777570"
+            self.entities["Q99102"]["claims"]["P7937"] = [
+                {"mainsnak": {"datavalue": {"value": {"id": "Q1344"}}}}
+            ]
+            self.entities["Q99102"]["claims"]["P31"].append(
+                {"mainsnak": {"datavalue": {"value": {"id": "Q116476516"}}}}
+            )
+            cache.clear()
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Regional"}
+            )
+            self.assertEqual(response.context["data"]["results"], [])
+
+    def test_form_and_genre_subtypes_cannot_hide_medium_conflicts(self):
+        """Production ancestry in any classification property overrides a form."""
+        self.entities["Q99201"] = {
+            "id": "Q99201",
+            "lastrevid": 100,
+            "claims": {
+                "P279": [
+                    {"mainsnak": {"datavalue": {"value": {"id": parent}}}}
+                    for parent in ["Q25379", "Q7777570"]
+                ],
+            },
+        }
+        self.search_ids = []
+        for identifier, property_id in [("Q99202", "P7937"), ("Q99203", "P136")]:
+            self.entities[identifier] = {
+                "id": identifier,
+                "labels": {"en": {"value": "Conflicting work"}},
+                "claims": {
+                    "P31": [
+                        {"mainsnak": {"datavalue": {"value": {"id": "Q116476516"}}}}
+                    ],
+                    property_id: [
+                        {"mainsnak": {"datavalue": {"value": {"id": "Q99201"}}}}
+                    ],
+                },
+            }
+            self.search_ids.append(identifier)
+        response = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "work"}
+        )
+        self.assertEqual(response.context["data"]["results"], [])
+
     def test_category_artwork_requires_independent_work_and_creator_evidence(self):
         """Category membership is discovery, not sufficient identity or reuse proof."""
         fixture = json.loads(

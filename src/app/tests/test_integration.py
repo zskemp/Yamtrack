@@ -405,6 +405,73 @@ class IntegrationTest(StaticLiveServerTestCase):
             self.page.set_viewport_size({"width": 1280, "height": 720})
             cache.clear()
 
+    def test_theater_specific_subtype_fallback_search_to_tracking(self):
+        """Subtype-only works can be found by title and tracked on both layouts."""
+        work = {
+            "id": "Q98001",
+            "labels": {"en": {"value": "Regional Opera"}},
+            "claims": {
+                "P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q98002"}}}}]
+            },
+        }
+        work_type = {
+            "id": "Q98002",
+            "lastrevid": 100,
+            "claims": {
+                "P279": [{"mainsnak": {"datavalue": {"value": {"id": "Q1344"}}}}]
+            },
+        }
+
+        def source_response(url, params, **_kwargs):
+            if "commons.wikimedia.org" in url:
+                payload = {"query": {"search": []}}
+            elif params["action"] == "query":
+                hits = (
+                    []
+                    if "haswbstatement" in params["srsearch"]
+                    else [{"title": "Q98001"}]
+                )
+                payload = {"query": {"search": hits}}
+            else:
+                available = {"Q98001": work, "Q98002": work_type}
+                payload = {
+                    "entities": {
+                        identifier: available[identifier]
+                        for identifier in params["ids"].split("|")
+                    }
+                }
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(payload).encode()
+            return response
+
+        cache.clear()
+        try:
+            with patch(
+                "app.providers.services.session.get", side_effect=source_response
+            ):
+                for visit, width in enumerate((1280, 390)):
+                    self.page.set_viewport_size({"width": width, "height": 900})
+                    self.page.goto(
+                        f"{self.live_server_url}/search?media_type=theater&q=Regional"
+                    )
+                    self.page.get_by_title("Regional Opera", exact=True).click()
+                    expect(self.page.get_by_role("main")).to_contain_text("Opera")
+                    if visit == 0:
+                        self.page.get_by_role(
+                            "button", name="Add to tracker", exact=True
+                        ).click()
+                        self.page.get_by_label("Venue", exact=True).fill("Local Stage")
+                        self.page.get_by_role("button", name="Add", exact=True).click()
+                    expect(self.page.get_by_role("main")).to_contain_text("Local Stage")
+                    self.page.goto(f"{self.live_server_url}/test/theater")
+                    expect(
+                        self.page.get_by_title("Regional Opera", exact=True)
+                    ).to_have_count(1)
+        finally:
+            self.page.set_viewport_size({"width": 1280, "height": 720})
+            cache.clear()
+
     def test_theater_redirect_keeps_saved_attendance_visible(self):
         """Duplicate provider IDs resolve to one card without losing a saved visit."""
         fixture = json.loads(

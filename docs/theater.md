@@ -27,9 +27,18 @@ not guessed as Other. Manual creation remains available for unresolved works.
 Reviewed specific types include Italian opera, revue and pantomime. Named genre
 evidence is accepted only alongside recognized stage-work types. Direct production,
 performance, radio/audio drama and television-play classifications override form
-claims. Broad work types alone never imply a named form or Other. Ontology
-ancestry is not traversed blindly: some valid musical-work classes also have
-production ancestors in Wikidata.
+claims. Broad work types alone never imply a named form or Other. Specific types
+can follow up to three P279 parent links, with at most 50 distinct classes shared
+across the search. Reviewed work/form/medium anchors stop traversal: some valid
+musical-work classes have production ancestors that must not override work-level
+identity. Cycles, missing/deprecated ancestry and over-budget paths remain
+unresolved; positive production or broadcast evidence wins. Explicit work types
+remain usable when an unrelated secondary ancestry path is unresolved.
+Class parents and source revisions are cached for one hour. Search and details use
+the same classification version. When statement-filtered discovery yields no
+eligible work and request budget remains, one literal title/alias fallback batch
+uses the same classifier within the existing 150-candidate ceiling. The search
+limit notice also appears when the class-lookup budget is exhausted.
 
 Search inspects at most 150 provider candidates, preserves provider order and
 deduplicates actual redirect targets before pagination. A visible notice identifies
@@ -160,8 +169,8 @@ redirects, never by title, composer or image availability. Verified non-redirect
 duplicate/grouping mappings and fresh-install legacy-alias resolution remain open
 acceptance gates.
 
-Provider classification currently uses explicit supported forms rather than an
-unbounded ontology traversal. Some valid works with incomplete classifications
+Provider classification uses reviewed anchors and bounded subclass resolution,
+not an unrestricted ontology traversal. Some valid works with incomplete classifications
 will require manual entry. Production/granularity conflicts require further review.
 
 For ballet, ordinary versions and re-choreographies should share a work when the

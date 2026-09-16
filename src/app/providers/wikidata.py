@@ -46,6 +46,11 @@ CREATOR_ROLES = {
 }
 PAGE_SIZE = 20
 MAX_BATCHES = 3
+CLASSIFICATION_VERSION = 4
+CLASS_DEPTH_LIMIT = 3
+CLASS_COUNT_LIMIT = 50
+TYPE_PROPERTIES = ("P31", "P7937", "P136")
+TYPE_ANCHORS = set(WORK_IDS) | set(GENRE_FORMS) | EXCLUDED_TYPES
 
 
 def request_data(params):
@@ -107,22 +112,109 @@ def identifiers(entity, property_id):
     ]
 
 
+def resolved_type(identifier, graph, path=()):
+    """Stop at reviewed anchors; cycles and incomplete ancestry remain unresolved."""
+    if identifier in TYPE_ANCHORS:
+        return {identifier}
+    if identifier in path or len(path) >= CLASS_DEPTH_LIMIT:
+        return None
+    parents = graph.get(identifier, {}).get("parents", [])
+    if not parents:
+        return None
+    resolved = set()
+    incomplete = False
+    for parent in parents:
+        parent_types = resolved_type(parent, graph, (*path, identifier))
+        if parent_types is None:
+            incomplete = True
+        else:
+            resolved.update(parent_types)
+    if incomplete and not EXCLUDED_TYPES.intersection(resolved):
+        return None
+    return resolved
+
+
+def classify_entities(work_entities, graph):
+    """Resolve specific source classes within one shared per-search graph budget."""
+    frontier = {
+        identifier
+        for entity in work_entities.values()
+        for property_id in TYPE_PROPERTIES
+        for identifier in identifiers(entity, property_id)
+    }
+    for _depth in range(CLASS_DEPTH_LIMIT):
+        pending = sorted(frontier - TYPE_ANCHORS - graph.keys())[
+            : max(0, CLASS_COUNT_LIMIT - len(graph))
+        ]
+        uncached = []
+        for identifier in pending:
+            cached = cache.get(f"wikidata_class_v{CLASSIFICATION_VERSION}_{identifier}")
+            if cached is None:
+                uncached.append(identifier)
+            else:
+                graph[identifier] = cached
+        fetched = entities(uncached)
+        for identifier in uncached:
+            entity = fetched.get(identifier, {"missing": ""})
+            record = {
+                "parents": identifiers(entity, "P279"),
+                "revision": entity.get("lastrevid"),
+            }
+            graph[identifier] = record
+            if "missing" not in entity and record["revision"]:
+                cache.set(
+                    f"wikidata_class_v{CLASSIFICATION_VERSION}_{identifier}",
+                    record,
+                    3600,
+                )
+        for identifier in pending:
+            graph.setdefault(identifier, {"parents": [], "revision": None})
+        frontier = {
+            parent
+            for identifier in frontier - TYPE_ANCHORS
+            for parent in graph.get(identifier, {}).get("parents", [])
+        }
+    for entity in work_entities.values():
+        entity["resolved_types"] = {
+            property_id: [
+                resolved_type(identifier, graph)
+                for identifier in identifiers(entity, property_id)
+            ]
+            for property_id in TYPE_PROPERTIES
+        }
+
+
+def type_evidence(entity, property_id):
+    """Return resolved anchors while retaining explicit claims on unhydrated data."""
+    resolved = entity.get("resolved_types", {}).get(property_id)
+    if resolved is None:
+        return identifiers(entity, property_id)
+    return sorted({anchor for anchors in resolved if anchors for anchor in anchors})
+
+
 def forms(entity):
     """Require explicit work form evidence without guessing unresolved forms."""
     if "missing" in entity:
         return []
-    types = identifiers(entity, "P31")
-    if EXCLUDED_TYPES.intersection(types):
+    types = type_evidence(entity, "P31")
+    if any(
+        EXCLUDED_TYPES.intersection(type_evidence(entity, property_id))
+        for property_id in TYPE_PROPERTIES
+    ):
+        return []
+    if not set(WORK_IDS).intersection(types) and any(
+        anchors is None for anchors in entity.get("resolved_types", {}).get("P31", [])
+    ):
         return []
     if values(entity, "P272") and values(entity, "P161") and values(entity, "P57"):
         return []
-    evidence = identifiers(entity, "P7937") + types
+    evidence = type_evidence(entity, "P7937") + types
     classified = [FORM_IDS[value] for value in evidence if value in FORM_IDS]
     stage_types = set(WORK_IDS) - {"Q7725634"}
     if stage_types.intersection(types):
         classified.extend(
             GENRE_FORMS[value]
-            for value in identifiers(entity, "P136")
+            for value in type_evidence(entity, "P136")
             if value in GENRE_FORMS
         )
     named_forms = [form for form in classified if form != "other"]
@@ -207,6 +299,7 @@ def transform(entity, related):
             "creators": list(dict.fromkeys(creator_names)),
         },
         "work_revision": entity.get("lastrevid"),
+        "classification_version": CLASSIFICATION_VERSION,
         "theater_forms": work_forms,
         "work_description": " / ".join([details["forms"], *dict.fromkeys(creators)]),
         "synopsis": entity.get("descriptions", {})
@@ -264,9 +357,14 @@ def theater(media_id):
     media_id = theater_identity.canonical_id(media_id)
     key = f"wikidata_theater_{media_id}"
     cached = cache.get(key)
-    if cached is not None and cached.get("artwork_policy") == commons.POLICY_VERSION:
+    if (
+        cached is not None
+        and cached.get("artwork_policy") == commons.POLICY_VERSION
+        and cached.get("classification_version") == CLASSIFICATION_VERSION
+    ):
         return cached
     entity = entities([media_id]).get(media_id, {})
+    classify_entities({media_id: entity}, {})
     if not forms(entity):
         services.raise_not_found_error(
             Sources.WIKIDATA.value, media_id, "theater work with a supported form"
@@ -278,11 +376,25 @@ def theater(media_id):
     return result
 
 
+def select_search_batch(params, selected, type_graph):
+    """Classify one provider batch without changing result order or identity rules."""
+    data = request_data(params)
+    hits = data.get("query", {}).get("search", [])[:50]
+    work_entities = entities([hit["title"] for hit in hits])
+    classify_entities(work_entities, type_graph)
+    for hit in hits:
+        entity = work_entities.get(hit["title"], {})
+        if forms(entity):
+            theater_identity.record_redirect(hit["title"], entity)
+            selected.setdefault(entity["id"], entity)
+    return data.get("continue", {})
+
+
 @commons.request_budget()
 def search(query, page):
     """Filter a bounded candidate window before canonical result pagination."""
     literal = " ".join(query.split())[:200]
-    key = f"wikidata_search_v5_{literal}"
+    key = f"wikidata_search_v8_{literal}"
     cached = cache.get(key)
     if cached is None:
         escaped = literal.replace("\\", "\\\\").replace('"', '\\"')
@@ -301,20 +413,24 @@ def search(query, page):
         }
         selected = {}
         continuation = {}
+        type_graph = {}
         for _batch in range(MAX_BATCHES):
-            data = request_data({**params, **continuation})
-            hits = data.get("query", {}).get("search", [])
-            work_entities = entities([hit["title"] for hit in hits])
-            for hit in hits:
-                entity = work_entities.get(hit["title"], {})
-                if forms(entity):
-                    theater_identity.record_redirect(hit["title"], entity)
-                    selected.setdefault(entity["id"], entity)
-            continuation = data.get("continue", {})
+            continuation = select_search_batch(
+                {**params, **continuation}, selected, type_graph
+            )
             if not continuation:
                 break
+        if not selected and _batch < MAX_BATCHES - 1:
+            continuation = select_search_batch(
+                {**params, "srsearch": f'inlabel:"{escaped}@*"'},
+                selected,
+                type_graph,
+            )
         results = hydrate(list(selected.values()))
-        cached = {"results": results, "limited": bool(continuation)}
+        cached = {
+            "results": results,
+            "limited": bool(continuation) or len(type_graph) >= CLASS_COUNT_LIMIT,
+        }
         cache.set(key, cached, 900)
     page = max(1, page)
     canonical_results = {}
