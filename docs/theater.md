@@ -41,9 +41,15 @@ identity. Cycles, missing/deprecated ancestry and over-budget paths remain
 unresolved; positive production or broadcast evidence wins. Explicit work types
 remain usable when an unrelated secondary ancestry path is unresolved.
 Class parents and source revisions are cached for one hour. Search and details use
-the same classification version. When statement-filtered discovery yields no
-eligible work and request budget remains, one literal title/alias fallback batch
-uses the same classifier within the existing 150-candidate ceiling. The search
+the same classification version. When statement-filtered discovery is exhausted
+with fewer than 20 eligible works and request budget remains, one literal
+title/alias fallback batch uses the same classifier within the existing
+150-candidate ceiling. Filtered works retain their order; newly verified fallback
+works append without duplicating identities. A full page or three spent batches
+prevents backfill. An optional fallback lookup failure preserves already-found
+works with the limited-search notice and does not cache the partial result.
+Identity conflicts still fail, and failed searches without usable results retain
+normal error behavior. The search
 limit notice also appears when the class-lookup budget is exhausted.
 
 Search inspects at most 150 provider candidates, preserves provider order and

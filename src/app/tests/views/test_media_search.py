@@ -379,6 +379,9 @@ class TheaterDiscoveryTests(TestCase):
         }
         self.search_ids = ["Q94002", "Q999"]
 
+        filtered_ids = []
+        fallback_unavailable = ""
+
         def source_response(url, params, **kwargs):
             if (
                 url == "https://www.wikidata.org/w/api.php"
@@ -386,17 +389,134 @@ class TheaterDiscoveryTests(TestCase):
             ):
                 response = requests.Response()
                 response.status_code = 200
-                response._content = b'{"query":{"search":[]}}'
+                response._content = json.dumps(
+                    {
+                        "query": {
+                            "search": [
+                                {"title": identifier} for identifier in filtered_ids
+                            ]
+                        }
+                    }
+                ).encode()
                 return response
+            if (
+                fallback_unavailable
+                and url == "https://www.wikidata.org/w/api.php"
+                and (
+                    fallback_unavailable == params.get("list")
+                    or fallback_unavailable in params.get("ids", "").split("|")
+                )
+            ):
+                raise requests.Timeout
             return self.source_response(url, params, **kwargs)
 
+        for filtered_ids in ([], ["Q19320959"]):
+            with self.subTest(filtered_ids=filtered_ids):
+                cache.clear()
+                with patch(
+                    "app.providers.services.session.get", side_effect=source_response
+                ):
+                    response = self.client.get(
+                        reverse("search"), {"media_type": "theater", "q": "Local alias"}
+                    )
+                self.assertContains(response, "Regional Opera")
+                self.assertNotContains(response, "Hamilton film")
+                self.assertEqual(
+                    [
+                        work["item"]["media_id"]
+                        for work in response.context["data"]["results"]
+                    ],
+                    [*filtered_ids, "Q94002"],
+                )
+
+        for unavailable_stage in ("search", "Q94002", "Q94001"):
+            with self.subTest(unavailable=unavailable_stage):
+                cache.clear()
+                fallback_unavailable = unavailable_stage
+                with patch(
+                    "app.providers.services.session.get", side_effect=source_response
+                ):
+                    response = self.client.get(
+                        reverse("search"), {"media_type": "theater", "q": "Local alias"}
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    self.assertContains(response, "Hamilton")
+                    self.assertTrue(response.context["data"]["limited"])
+                    fallback_unavailable = ""
+                    recovered = self.client.get(
+                        reverse("search"), {"media_type": "theater", "q": "Local alias"}
+                    )
+                    self.assertContains(recovered, "Regional Opera")
+
+        cache.clear()
+        TheaterRedirect.objects.create(
+            alias_id="Q94002", canonical_id="Q999", revision=10
+        )
+        self.entities["Q94002"].update(
+            id="Q19320959",
+            lastrevid=100,
+            redirects={"from": "Q94002", "to": "Q19320959"},
+        )
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
                 reverse("search"), {"media_type": "theater", "q": "Local alias"}
             )
-        self.assertContains(response, "Regional Opera")
-        self.assertNotContains(response, "Hamilton film")
-        self.assertEqual(response.context["data"]["total_results"], 1)
+        self.assertContains(response, "Conflicting Theater identity", status_code=500)
+        self.assertEqual(
+            TheaterRedirect.objects.get(alias_id="Q94002").canonical_id, "Q999"
+        )
+
+    def test_label_backfill_respects_full_pages_and_search_budget(self):
+        """Backfill never adds a batch after a full page or three filtered batches."""
+        for number in range(20):
+            identifier = f"Q{98000 + number}"
+            self.entities[identifier] = {
+                **self.entities["Q19320959"],
+                "id": identifier,
+                "labels": {"en": {"value": f"Stage Work {number}"}},
+            }
+        search_requests = []
+        batch_count = 1
+
+        def source_response(url, params, **kwargs):
+            if (
+                url == "https://www.wikidata.org/w/api.php"
+                and params.get("list") == "search"
+            ):
+                search_requests.append(params)
+                self.assertIn("haswbstatement", params["srsearch"])
+                payload = {
+                    "query": {
+                        "search": [
+                            {"title": identifier} for identifier in self.search_ids
+                        ]
+                    }
+                }
+                if len(search_requests) < batch_count:
+                    payload["continue"] = {"sroffset": len(search_requests) * 50}
+                response = requests.Response()
+                response.status_code = 200
+                response._content = json.dumps(payload).encode()
+                return response
+            return self.source_response(url, params, **kwargs)
+
+        for result_count, batch_count in ((20, 1), (1, 3)):
+            with self.subTest(result_count=result_count, batch_count=batch_count):
+                cache.clear()
+                search_requests.clear()
+                self.search_ids = [
+                    f"Q{98000 + number}" for number in range(result_count)
+                ]
+                with patch(
+                    "app.providers.services.session.get", side_effect=source_response
+                ):
+                    response = self.client.get(
+                        reverse("search"), {"media_type": "theater", "q": "Stage"}
+                    )
+                self.assertEqual(
+                    response.context["data"]["total_results"], result_count
+                )
+                self.assertEqual(len(search_requests), batch_count)
 
     def test_type_budget_is_shared_across_provider_pages(self):
         """Later result pages cannot reset the bounded class lookup budget."""

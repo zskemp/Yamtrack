@@ -427,13 +427,25 @@ class IntegrationTest(StaticLiveServerTestCase):
                 payload = {"query": {"search": []}}
             elif params["action"] == "query":
                 hits = (
-                    []
+                    [{"title": "Q98003"}]
                     if "haswbstatement" in params["srsearch"]
                     else [{"title": "Q98001"}]
                 )
                 payload = {"query": {"search": hits}}
             else:
-                available = {"Q98001": work, "Q98002": work_type}
+                available = {
+                    "Q98001": work,
+                    "Q98002": work_type,
+                    "Q98003": {
+                        "id": "Q98003",
+                        "labels": {"en": {"value": "Regional Play"}},
+                        "claims": {
+                            "P31": [
+                                {"mainsnak": {"datavalue": {"value": {"id": "Q25379"}}}}
+                            ]
+                        },
+                    },
+                }
                 payload = {
                     "entities": {
                         identifier: available[identifier]
@@ -455,6 +467,9 @@ class IntegrationTest(StaticLiveServerTestCase):
                     self.page.goto(
                         f"{self.live_server_url}/search?media_type=theater&q=Regional"
                     )
+                    expect(
+                        self.page.get_by_title("Regional Play", exact=True)
+                    ).to_have_count(1)
                     self.page.get_by_title("Regional Opera", exact=True).click()
                     expect(self.page.get_by_role("main")).to_contain_text("Opera")
                     if visit == 0:

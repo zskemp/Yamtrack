@@ -376,12 +376,17 @@ def theater(media_id):
     return result
 
 
-def select_search_batch(params, selected, type_graph):
+def select_search_batch(params, selected, type_graph, *, optional=False):
     """Classify one provider batch without changing result order or identity rules."""
-    data = request_data(params)
-    hits = data.get("query", {}).get("search", [])[:50]
-    work_entities = entities([hit["title"] for hit in hits])
-    classify_entities(work_entities, type_graph)
+    try:
+        data = request_data(params)
+        hits = data.get("query", {}).get("search", [])[:50]
+        work_entities = entities([hit["title"] for hit in hits])
+        classify_entities(work_entities, type_graph)
+    except services.ProviderAPIError:
+        if optional:
+            return None
+        raise
     for hit in hits:
         entity = work_entities.get(hit["title"], {})
         if forms(entity):
@@ -394,7 +399,7 @@ def select_search_batch(params, selected, type_graph):
 def search(query, page):
     """Filter a bounded candidate window before canonical result pagination."""
     literal = " ".join(query.split())[:200]
-    key = f"wikidata_search_v8_{literal}"
+    key = f"wikidata_search_v9_{literal}"
     cached = cache.get(key)
     if cached is None:
         escaped = literal.replace("\\", "\\\\").replace('"', '\\"')
@@ -414,24 +419,30 @@ def search(query, page):
         selected = {}
         continuation = {}
         type_graph = {}
+        incomplete = False
         for _batch in range(MAX_BATCHES):
             continuation = select_search_batch(
                 {**params, **continuation}, selected, type_graph
             )
             if not continuation:
                 break
-        if not selected and _batch < MAX_BATCHES - 1:
+        if len(selected) < PAGE_SIZE and not continuation and _batch < MAX_BATCHES - 1:
             continuation = select_search_batch(
                 {**params, "srsearch": f'inlabel:"{escaped}@*"'},
                 selected,
                 type_graph,
+                optional=bool(selected),
             )
+            incomplete = continuation is None
         results = hydrate(list(selected.values()))
         cached = {
             "results": results,
-            "limited": bool(continuation) or len(type_graph) >= CLASS_COUNT_LIMIT,
+            "limited": incomplete
+            or bool(continuation)
+            or len(type_graph) >= CLASS_COUNT_LIMIT,
         }
-        cache.set(key, cached, 900)
+        if not incomplete:
+            cache.set(key, cached, 900)
     page = max(1, page)
     canonical_results = {}
     for work in cached["results"]:
