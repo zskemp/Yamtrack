@@ -293,6 +293,9 @@ class IntegrationTest(StaticLiveServerTestCase):
             (Path(__file__).parent / "mock_data/theater_artwork.json").read_text()
         )
         poster = fixture["poster"]
+        fixture["work"]["claims"]["P18"] = [
+            {"mainsnak": {"datavalue": {"value": "Work poster.png"}}}
+        ]
         image_url = poster["imageinfo"][0]["url"]
         image = base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII="
@@ -374,32 +377,13 @@ class IntegrationTest(StaticLiveServerTestCase):
         expect(picture).to_have_attribute("src", settings.IMG_NONE)
         self.assertEqual(picture.bounding_box()["height"], frame["height"])
 
-    @staticmethod
-    def _poster_source_response(fixture, url, params):
-        """Serve independent work, photo, and exact-depiction poster HTTP fixtures."""
+    def _poster_source_response(self, fixture, url, params):
+        """Serve work-linked photo and poster metadata without discovery."""
         poster = fixture["poster"]
         if "commons.wikimedia.org" in url:
-            if params.get("list") == "search":
-                payload = {
-                    "query": {"search": [{"pageid": 124, "title": poster["title"]}]}
-                }
-            elif params["action"] == "wbgetentities":
-                payload = {
-                    "entities": {
-                        "M124": {
-                            "statements": {
-                                "P180": [
-                                    {
-                                        "mainsnak": {
-                                            "datavalue": {"value": {"id": "Q822850"}}
-                                        }
-                                    }
-                                ]
-                            }
-                        }
-                    }
-                }
-            elif "Work poster.png" in params.get("titles", ""):
+            self.assertNotIn("list", params)
+            self.assertEqual(params["action"], "query")
+            if "Work poster.png" in params.get("titles", ""):
                 payload = {"query": {"pages": {"124": poster}}}
             else:
                 payload = fixture["commons"]
@@ -412,12 +396,11 @@ class IntegrationTest(StaticLiveServerTestCase):
         response._content = json.dumps(payload).encode()
         return response
 
-    def test_theater_category_image_search_to_library(self):
-        """Category-backed images and credits remain usable at both viewport sizes."""
+    def test_theater_direct_image_search_to_library(self):
+        """Direct-file images and credits remain usable at both viewport sizes."""
         fixture = json.loads(
             (Path(__file__).parent / "mock_data/theater_artwork.json").read_text()
         )
-        fixture["work"]["claims"].pop("P18")
         fixture["work"]["claims"].update(
             {
                 "P373": [{"mainsnak": {"datavalue": {"value": "Stage Work"}}}],
@@ -460,35 +443,9 @@ class IntegrationTest(StaticLiveServerTestCase):
                         }
                     }
                 )
-            elif params.get("list") == "search":
-                payload = {"query": {"search": []}}
-            elif params.get("prop") == "pageprops|info":
-                payload = {
-                    "query": {
-                        "pages": {
-                            "456": {
-                                "pageid": 456,
-                                "ns": 14,
-                                "lastrevid": 700,
-                                "title": "Category:Stage Work",
-                                "pageprops": {"wikibase_item": "Q822850"},
-                            }
-                        }
-                    }
-                }
-            elif params.get("list") == "categorymembers":
-                payload = {
-                    "query": {
-                        "categorymembers": [
-                            {
-                                "ns": 6,
-                                "pageid": 123,
-                                "title": "File:Test stage photograph.jpg",
-                            }
-                        ]
-                    }
-                }
             else:
+                self.assertNotIn("list", params)
+                self.assertEqual(params["prop"], "imageinfo|categories|templates|info")
                 payload = fixture["commons"]
             response = requests.Response()
             response.status_code = 200
@@ -523,7 +480,16 @@ class IntegrationTest(StaticLiveServerTestCase):
                         self.page.get_by_label("Venue", exact=True).fill(
                             "Local Theatre"
                         )
-                        self.page.get_by_role("button", name="Add", exact=True).click()
+                        with self.page.expect_response(
+                            lambda response: (
+                                "/media_save" in response.url
+                                and response.request.method == "POST"
+                            )
+                        ) as saved:
+                            self.page.get_by_role(
+                                "button", name="Add", exact=True
+                            ).click()
+                        self.assertTrue(saved.value.ok)
                     self.page.goto(f"{self.live_server_url}/test/theater")
                     self.page.get_by_text("Image credit", exact=True).click()
                     expect(

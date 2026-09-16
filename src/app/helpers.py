@@ -178,6 +178,32 @@ def _needs_image_refresh(item, new_image):
     return not item.image or item.image == settings.IMG_NONE
 
 
+def preserve_theater_artwork(metadata, item=None):
+    """Retain saved artwork when a reduced lookup cannot replace it."""
+    if metadata.get("media_type") != MediaTypes.THEATER.value:
+        return
+    if item is None:
+        item = Item.objects.filter(
+            media_id=metadata["media_id"],
+            source=metadata["source"],
+            media_type=MediaTypes.THEATER.value,
+        ).first()
+    if item is None or item.media_type != MediaTypes.THEATER.value:
+        return
+    saved = item.theater_artwork
+    fresh = metadata.get("theater_artwork", {})
+    if saved and (
+        metadata.get("artwork_unavailable")
+        or (not fresh and metadata.get("artwork_direct_missing"))
+        or (
+            isinstance(saved.get("evidence"), str)
+            and saved["evidence"] in {"P180", "P373/description"}
+            and fresh.get("provider") != "wikipedia"
+        )
+    ):
+        metadata.update(image=item.image, theater_artwork=saved)
+
+
 def refresh_item_image_if_missing(item, new_image, theater_artwork=None):
     """Update an Item's stored image when it's missing and a real one is available."""
     if theater_artwork is not None:
@@ -211,11 +237,8 @@ def enrich_items_with_user_data(request, items, section_name):
             key = (str(item["media_id"]), item["source"])
 
         media_item = media_lookup.get(key)
-        if media_item is not None and item.get("artwork_unavailable"):
-            item.update(
-                image=media_item.item.image,
-                theater_artwork=media_item.item.theater_artwork,
-            )
+        if media_item is not None:
+            preserve_theater_artwork(item, media_item.item)
         if _should_skip_completed_recommendation(
             request.user, section_name, media_item
         ):

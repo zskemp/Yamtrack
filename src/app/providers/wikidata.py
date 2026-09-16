@@ -410,16 +410,15 @@ def hydrate(work_entities):
     ]
 
 
-def illustrate(work, *, prefer_posters=True, article_artwork=None):
+def illustrate(work, *, article_artwork=None):
     """Attach image and credit together after work selection and pagination."""
     work = work.copy()
+    work["artwork_direct_missing"] = not work.get("artwork_candidates")
     artwork = article_artwork or commons.artwork(
         work.pop("artwork_work_id", work["media_id"]),
         work.pop("artwork_candidates", []),
         work.get("work_revision"),
         work["theater_forms"],
-        category_context=work.get("artwork_category_context"),
-        prefer_posters=prefer_posters,
     )
     work["artwork_unavailable"] = artwork is None
     work["artwork_partial"] = bool(artwork) and not artwork.get(
@@ -576,23 +575,15 @@ def illustrate_page(displayed, article_artworks):
     illustrated = [
         illustrate(
             work,
-            prefer_posters=False,
             article_artwork=article_artworks[work["media_id"]],
         )
         for work in displayed
     ]
-    for index, work in enumerate(illustrated):
-        artwork = work["theater_artwork"]
-        if (
-            artwork
-            and not work["artwork_partial"]
-            and not artwork.get("poster_search_complete")
-        ):
-            illustrated[index] = illustrate(displayed[index])
-        illustrated[index]["artwork_partial"] = illustrated[index][
-            "artwork_partial"
-        ] or wikipedia.incomplete(article_artworks[work["media_id"]])
-        illustrated[index]["artwork_unavailable"] = illustrated[index][
+    for work in illustrated:
+        work["artwork_partial"] = work["artwork_partial"] or wikipedia.incomplete(
+            article_artworks[work["media_id"]]
+        )
+        work["artwork_unavailable"] = work[
             "artwork_unavailable"
         ] or wikipedia.incomplete(article_artworks[work["media_id"]])
     return illustrated

@@ -323,6 +323,7 @@ def media_details(request, source, media_type, media_id, title):  # noqa: ARG001
     current_instance = user_medias[0] if user_medias else None
 
     if current_instance is not None:
+        helpers.preserve_theater_artwork(media_metadata, current_instance.item)
         if media_metadata.get("artwork_unavailable"):
             media_metadata.update(
                 image=current_instance.item.image,
@@ -488,6 +489,7 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
             source,
             [season_number],
         )
+        helpers.preserve_theater_artwork(metadata)
         theater_defaults = (
             {
                 "theater_forms": metadata["theater_forms"],

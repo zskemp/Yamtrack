@@ -28,9 +28,6 @@ LEGACY_POLICY_VERSION = 3
 PD_ART_NOTICE_POLICY_VERSION = 8
 MIN_IMAGE_DIMENSION = 200
 NON_POSTER_RANK = 2
-DEPICTION_CANDIDATE_LIMIT = 12
-CATEGORY_CANDIDATE_LIMIT = 10
-CATEGORY_NAMESPACE = 14
 FILE_NAMESPACE = 6
 MIN_CREATOR_WORDS = 2
 ARTWORK_REQUEST_LIMIT = 24
@@ -579,87 +576,6 @@ def request_data(params):
     return response
 
 
-def depicts_work(entity, work_id):
-    """Validate concrete depiction evidence before treating it as a match or absence."""
-    if not isinstance(entity, dict):
-        raise ArtworkUnavailableError
-    if "missing" in entity:
-        return False
-    statements = entity.get("statements")
-    if not isinstance(statements, dict) or not isinstance(
-        statements.get("P180", []), list
-    ):
-        raise ArtworkUnavailableError
-    matched = False
-    for claim in statements.get("P180", []):
-        if not isinstance(claim, dict):
-            raise ArtworkUnavailableError
-        if claim.get("rank") == "deprecated":
-            continue
-        snak = claim.get("mainsnak")
-        if not isinstance(snak, dict) or snak.get("snaktype", "value") not in (
-            "value",
-            "somevalue",
-            "novalue",
-        ):
-            raise ArtworkUnavailableError
-        if snak.get("snaktype") in ("somevalue", "novalue"):
-            continue
-        data = snak.get("datavalue")
-        value = data.get("value") if isinstance(data, dict) else None
-        if (
-            not isinstance(value, dict)
-            or not isinstance(value.get("id"), str)
-            or not re.fullmatch(r"Q[1-9][0-9]*", value["id"])
-        ):
-            raise ArtworkUnavailableError
-        matched = matched or value["id"] == work_id
-    return matched
-
-
-def depicted_files(work_id):
-    """Find a bounded set of exact-work depictions and verify their statements."""
-    response = request_data(
-        {
-            "action": "query",
-            "list": "search",
-            "srnamespace": 6,
-            "srlimit": DEPICTION_CANDIDATE_LIMIT,
-            "srsearch": f"haswbstatement:P180={work_id}",
-        }
-    )
-    query = response.get("query")
-    hits = query.get("search") if isinstance(query, dict) else None
-    if not isinstance(hits, list):
-        raise ArtworkUnavailableError
-    hits = hits[:DEPICTION_CANDIDATE_LIMIT]
-    if any(
-        not isinstance(hit, dict)
-        or type(hit.get("pageid")) is not int
-        or hit["pageid"] <= 0
-        or not isinstance(hit.get("title"), str)
-        or not hit["title"].startswith("File:")
-        for hit in hits
-    ):
-        raise ArtworkUnavailableError
-    if not hits:
-        return []
-    entities = request_data(
-        {
-            "action": "wbgetentities",
-            "props": "claims",
-            "ids": "|".join(f"M{hit['pageid']}" for hit in hits),
-        }
-    ).get("entities")
-    if not isinstance(entities, dict):
-        raise ArtworkUnavailableError
-    return [
-        hit["title"].removeprefix("File:")
-        for hit in hits
-        if depicts_work(entities.get(f"M{hit['pageid']}"), work_id)
-    ]
-
-
 def merge_file_metadata(merged, response):
     """Reject malformed fragments before merging rights-bearing file metadata."""
     query = response.get("query")
@@ -730,9 +646,6 @@ def artwork(
     filenames,
     revision,
     work_forms=(),
-    *,
-    category_context=None,
-    prefer_posters=True,
 ):
     """Preserve the distinction between unavailable and confirmed absent images."""
     try:
@@ -741,8 +654,6 @@ def artwork(
             filenames,
             revision,
             work_forms,
-            category_context,
-            prefer_posters=prefer_posters,
         )
     except ArtworkUnavailableError:
         return None
@@ -901,92 +812,6 @@ def complete_category_evidence(artwork):
     )
 
 
-def category_query(params):
-    """Validate optional discovery envelopes before reading nested source fields."""
-    response = request_data(params)
-    if not isinstance(response, dict) or not isinstance(response.get("query"), dict):
-        raise ArtworkUnavailableError
-    return response
-
-
-def category_candidates(work_id, context, work_forms):
-    """Discover direct files only through a reciprocal source-linked category."""
-    if not context or not context.get("creators") or not context.get("categories"):
-        return [], False
-    candidates = []
-    try:
-        category_title = "Category:" + context["categories"][0].removeprefix(
-            "Category:"
-        )
-        response = category_query(
-            {"action": "query", "titles": category_title, "prop": "pageprops|info"}
-        )
-        pages = response.get("query", {}).get("pages")
-        category = (
-            next(iter(pages.values()))
-            if isinstance(pages, dict) and len(pages) == 1
-            else {}
-        )
-        if (
-            not isinstance(category, dict)
-            or not isinstance(category.get("lastrevid"), int)
-            or not isinstance(category.get("pageid"), int)
-            or not isinstance(category.get("title"), str)
-            or not isinstance(category.get("pageprops", {}), dict)
-        ):
-            return [], True
-        pageprops = category.get("pageprops", {})
-        if (
-            category.get("ns") != CATEGORY_NAMESPACE
-            or pageprops.get("wikibase_item") != work_id
-        ):
-            return [], False
-        members = category_query(
-            {
-                "action": "query",
-                "list": "categorymembers",
-                "cmpageid": category["pageid"],
-                "cmtype": "file",
-                "cmlimit": CATEGORY_CANDIDATE_LIMIT,
-            }
-        )
-        files = members.get("query", {}).get("categorymembers")
-        if not isinstance(files, list) or any(
-            not isinstance(entry, dict) for entry in files
-        ):
-            return [], True
-        filenames = [
-            entry["title"].removeprefix("File:")
-            for entry in files[:CATEGORY_CANDIDATE_LIMIT]
-            if entry.get("ns") == FILE_NAMESPACE and isinstance(entry.get("title"), str)
-        ]
-        for page in image_pages(filenames):
-            match = category_match(page, context, work_forms)
-            if not match or not suitable_for_work(page, work_forms):
-                continue
-            candidate = qualified_image(page)
-            if candidate:
-                candidate.update(
-                    **match,
-                    category_id=category["pageid"],
-                    category_title=category["title"],
-                    category_revision=category["lastrevid"],
-                    category_work_id=work_id,
-                )
-                candidates.append(candidate)
-    except ArtworkUnavailableError:
-        return candidates, True
-    return candidates, bool(members.get("continue"))
-
-
-def depiction_candidates(work_id, work_forms):
-    """Let independent category discovery proceed after a depiction lookup fails."""
-    try:
-        return verified_candidates(depicted_files(work_id), work_forms, enrichment=True)
-    except ArtworkUnavailableError:
-        return [], True
-
-
 def artwork_preference(candidate):
     """Rank explicit poster descriptions ahead of title hints and portrait fit."""
     description = candidate["description"].strip()
@@ -1010,9 +835,6 @@ def select_artwork(
     filenames,
     revision,
     work_forms,
-    category_context=None,
-    *,
-    prefer_posters=True,
 ):
     """Select a reusable work image from at most five direct candidates."""
     filenames = list(
@@ -1025,33 +847,10 @@ def select_artwork(
         and cached.get("work_revision") == revision
         and cached.get("work_forms") == list(work_forms)
     ):
-        if not prefer_posters or cached.get("poster_search_complete"):
-            return cached
-        candidates, unavailable = [cached.copy()], False
-    else:
-        candidates, unavailable = verified_candidates(filenames, work_forms)
-        for candidate in candidates:
-            candidate["evidence"] = "P18/P154"
-    has_poster = any(
-        artwork_preference(candidate)[0] < NON_POSTER_RANK for candidate in candidates
-    )
-    if not candidates or (prefer_posters and not has_poster):
-        depictions, depiction_unavailable = depiction_candidates(work_id, work_forms)
-        candidates.extend(
-            [
-                {**candidate, "evidence": "P180"}
-                for candidate in depictions
-                if not candidates or artwork_preference(candidate)[0] < NON_POSTER_RANK
-            ]
-        )
-        unavailable = unavailable or depiction_unavailable
-    if not candidates:
-        candidates, category_unavailable = category_candidates(
-            work_id, category_context, work_forms
-        )
-        for candidate in candidates:
-            candidate["evidence"] = "P373/description"
-        unavailable = unavailable or category_unavailable
+        return cached
+    candidates, unavailable = verified_candidates(filenames, work_forms)
+    for candidate in candidates:
+        candidate["evidence"] = "P18/P154"
     if not candidates and unavailable:
         raise ArtworkUnavailableError
     candidates.sort(key=artwork_preference)
@@ -1062,9 +861,7 @@ def select_artwork(
             work_revision=revision,
             work_forms=list(work_forms),
             selection_complete=not unavailable,
-            poster_search_complete=prefer_posters
-            or has_poster
-            or selected["evidence"] != "P18/P154",
+            poster_search_complete=True,
         )
         if not unavailable:
             cache.set(key, selected, 3600)
