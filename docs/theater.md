@@ -14,6 +14,12 @@ rows and their personal fields. Imports do not replace shared Theater metadata.
 Invalid classifications are reported without overwriting existing attendance.
 Theater imports require a title; absent titles are rejected before overwrite
 bookkeeping, without attempting a provider lookup.
+Imports accept only manual or Wikidata Theater sources. Wikidata IDs must be
+syntactically valid QIDs within the catalog's 36-character limit; this offline
+check does not certify that an entity exists or establish alias equivalence.
+Season and episode columns must be blank for Theater works. Invalid identities
+are reported and skipped before overwrite bookkeeping, so later valid rows can
+still restore without changing existing attendance for the rejected work.
 Artwork metadata is also JSON in CSV exports. Provider images are restored only
 with matching work identity, HTTPS Wikimedia URLs and an allowed license credit.
 Older or malformed credits fall back to a missing image without losing attendance.

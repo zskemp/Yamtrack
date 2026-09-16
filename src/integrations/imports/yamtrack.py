@@ -178,10 +178,30 @@ class YamtrackImporter:
             self.warnings.append(error_msg)
             logger.error(error_msg)
 
+    @staticmethod
+    def _theater_identity_error(row):
+        """Identify unsupported or malformed standalone Theater identities."""
+        if any(row.get(field) for field in ("season_number", "episode_number")):
+            return "Theater import cannot include season or episode numbers."
+        if row.get("source") not in {Sources.MANUAL.value, Sources.WIKIDATA.value}:
+            return "Theater import requires a manual or Wikidata source."
+        if row["source"] == Sources.WIKIDATA.value:
+            try:
+                forms.RegexField(
+                    regex=r"\AQ[1-9][0-9]*\Z", max_length=36, strip=False
+                ).clean(row.get("media_id"))
+            except ValidationError:
+                return "Theater import requires a valid Wikidata work ID."
+        return ""
+
     def _theater_defaults(self, row):
         """Validate Theater before overwrite bookkeeping or shared item changes."""
         if row["media_type"] != MediaTypes.THEATER.value:
             return {}
+        identity_error = self._theater_identity_error(row)
+        if identity_error:
+            self.warnings.append(identity_error)
+            return None
         if not row.get("title", "").strip():
             self.warnings.append("Theater import requires a work title.")
             return None

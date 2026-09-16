@@ -37,6 +37,132 @@ class TheaterExportRestoreTest(TestCase):
         cache.clear()
         self.addCleanup(cache.clear)
 
+    def test_invalid_provider_identity_does_not_block_valid_attendance_restore(self):
+        """Reject unusable provider identities without losing valid CSV rows."""
+        owner = get_user_model().objects.create_user(username="identity-owner")
+        recipient = get_user_model().objects.create_user(username="identity-recipient")
+        work = Item.objects.create(
+            media_id="Q822850",
+            source="wikidata",
+            media_type="theater",
+            title="The House of Bernarda Alba",
+            theater_forms=["play"],
+        )
+        Theater.objects.create(item=work, user=owner, status="Completed", notes="Keep")
+        self.client.force_login(owner)
+        content = b"".join(self.client.get(reverse("export_csv")).streaming_content)
+        original = next(csv.DictReader(StringIO(content.decode())))
+        self.client.force_login(recipient)
+        for source, media_id in (
+            ("wikidata", "not-a-qid"),
+            ("wikidata", ""),
+            ("wikidata", "Q0"),
+            ("wikidata", "Q0822850"),
+            ("wikidata", " Q822850"),
+            ("wikidata", "Q822850\n"),
+            ("wikidata", "Q" + "8" * 36),
+            ("tmdb", "822850"),
+            ("unknown", "Q822850"),
+        ):
+            with self.subTest(source=source, media_id=media_id):
+                invalid = {**original, "source": source, "media_id": media_id}
+                expected_notes = f"Recovered after {source}:{media_id!r}"
+                upload = StringIO()
+                writer = csv.DictWriter(upload, fieldnames=original.keys())
+                writer.writeheader()
+                writer.writerows([invalid, {**original, "notes": expected_notes}])
+                with (
+                    self.assertLogs("celery.app.trace", level="INFO") as task_logs,
+                    patch(
+                        "app.providers.services.session.get",
+                        side_effect=AssertionError("Restore must stay offline"),
+                    ),
+                ):
+                    response = self.client.post(
+                        reverse("import_yamtrack"),
+                        {
+                            "mode": "overwrite",
+                            "yamtrack_csv": SimpleUploadedFile(
+                                "identity.csv", upload.getvalue().encode()
+                            ),
+                        },
+                    )
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(Item.objects.filter(media_type="theater").count(), 1)
+                restored = Theater.objects.get(user=recipient)
+                self.assertEqual(restored.item, work)
+                self.assertEqual(restored.notes, expected_notes)
+                self.assertEqual(Theater.objects.get(user=owner).notes, "Keep")
+                result = "\n".join(task_logs.output)
+                self.assertIn("Imported 1 Theater.", result)
+                self.assertIn(
+                    "Theater import requires a valid Wikidata work ID."
+                    if source == "wikidata"
+                    else "Theater import requires a manual or Wikidata source.",
+                    result,
+                )
+
+    def test_theater_restore_rejects_season_and_episode_identity(self):
+        """Non-applicable series fields cannot split a work or erase attendance."""
+        owner = get_user_model().objects.create_user(username="standalone-owner")
+        work = Item.objects.create(
+            media_id="Q822850",
+            source="wikidata",
+            media_type="theater",
+            title="The House of Bernarda Alba",
+            theater_forms=["play"],
+        )
+        attendance = Theater.objects.create(
+            item=work, user=owner, status="Completed", notes="Original visit"
+        )
+        self.client.force_login(owner)
+        content = b"".join(self.client.get(reverse("export_csv")).streaming_content)
+        original = next(csv.DictReader(StringIO(content.decode())))
+        for field in ("season_number", "episode_number"):
+            for value in ("1", "0", "not-a-number"):
+                with self.subTest(field=field, value=value):
+                    expected_notes = f"Recovered after {field}:{value}"
+                    upload = StringIO()
+                    writer = csv.DictWriter(upload, fieldnames=original.keys())
+                    writer.writeheader()
+                    writer.writerow({**original, field: value, "notes": "Invalid"})
+                    writer.writerow(
+                        {**original, "media_id": "Q822851", "notes": expected_notes}
+                    )
+                    with (
+                        self.assertLogs("celery.app.trace", level="INFO") as task_logs,
+                        patch(
+                            "app.providers.services.session.get",
+                            side_effect=AssertionError("Restore must stay offline"),
+                        ),
+                    ):
+                        response = self.client.post(
+                            reverse("import_yamtrack"),
+                            {
+                                "mode": "overwrite",
+                                "yamtrack_csv": SimpleUploadedFile(
+                                    "standalone.csv", upload.getvalue().encode()
+                                ),
+                            },
+                        )
+                    self.assertEqual(response.status_code, 302)
+                    attendance.refresh_from_db()
+                    self.assertEqual(attendance.notes, "Original visit")
+                    self.assertEqual(
+                        Theater.objects.get(user=owner, item__media_id="Q822851").notes,
+                        expected_notes,
+                    )
+                    self.assertEqual(
+                        Item.objects.filter(media_type="theater").count(), 2
+                    )
+                    self.assertEqual(Theater.objects.filter(user=owner).count(), 2)
+                    result = "\n".join(task_logs.output)
+                    self.assertIn("Imported 1 Theater.", result)
+                    self.assertIn(
+                        "Theater import cannot include season or episode numbers.",
+                        result,
+                    )
+
     def test_older_pd_art_export_gains_caveat_without_losing_image(self):
         """Older credits retain images and gain any required reproduction caveat."""
         fixture = json.loads(
