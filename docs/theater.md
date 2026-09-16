@@ -88,7 +88,13 @@ QID-only results.
 Commons images are eligible through a work's direct P18 image/P154 logo claim or verified
 exact-work P180 depiction statements. Enrichment runs only for the displayed
 page, not every candidate. Each work examines up to five direct files and, if
-none qualify, up to twelve exact-depiction candidates. Requests are serial and reuse the
+none qualify, up to twelve exact-depiction candidates. After this initial coverage
+pass across the displayed page, remaining budget can inspect that same depiction
+window for works with a qualified direct image but no poster. Only a qualified
+depiction poster can replace an existing direct non-poster image. Direct posters
+skip this optional lookup. Qualified direct images are reused without fetching
+their metadata again; each selection retains its own matching evidence and credit.
+Requests are serial and reuse the
 provider transport. Successful artwork selections are cached for one hour;
 Commons rate-limit responses impose a shared retry cooldown.
 File metadata is fetched in groups of three with at most one continuation request
@@ -162,9 +168,14 @@ descriptions take priority over file/object-title poster hints; title hints appl
 only when a description is absent. Remaining ties prefer a 2:3 portrait ratio,
 then stable file ID. Incidental poster mentions do not establish poster preference.
 An explicitly described work poster may mention its advertisement purpose, but
-wrong-medium/adaptation and rights checks still apply. This ranking adds no HTTP
-requests and does not search additional sources once qualified candidates exist.
-Selection caches refresh with policy version 9; valid version-8 exports remain
+wrong-medium/adaptation and rights checks still apply. Poster upgrades share the
+same page-wide budget and never take calls ahead of initial image coverage.
+Upgrade failures preserve the qualified direct image and leave the upgrade
+retryable; complete negative scans cache the original selection for one hour.
+Malformed search hits or MediaInfo statement envelopes are unavailable evidence,
+not completed negative scans; they preserve the direct image and permit retry.
+Category discovery remains an absence-only fallback, not an upgrade source.
+Selection caches refresh with policy version 10; valid version-8/9 exports remain
 restorable without a provider request.
 
 Images use returned thumbnails without cropping. Image credit controls accompany

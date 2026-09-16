@@ -1877,7 +1877,11 @@ class TheaterDiscoveryTests(TestCase):
                 return self.source_response(url, params, **kwargs)
             response = requests.Response()
             response.status_code = 200
-            response._content = json.dumps(fixture["commons"]).encode()
+            response._content = json.dumps(
+                {"query": {"search": []}}
+                if params.get("list") == "search"
+                else fixture["commons"]
+            ).encode()
             return response
 
         with patch("app.providers.services.session.get", side_effect=source_response):
@@ -2410,7 +2414,9 @@ class TheaterDiscoveryTests(TestCase):
                 return self.source_response(url, params, **kwargs)
             response = requests.Response()
             response.status_code = 200
-            response._content = json.dumps(commons).encode()
+            response._content = json.dumps(
+                {"query": {"search": []}} if params.get("list") == "search" else commons
+            ).encode()
             return response
 
         with patch("app.providers.services.session.get", side_effect=http_response):
@@ -2592,6 +2598,263 @@ class TheaterDiscoveryTests(TestCase):
                 self.assertEqual(artwork["work_id"], "Q822850")
                 self.assertEqual(artwork["evidence"], "P18/P154")
                 self.assertEqual(artwork["source_url"], expected_info["descriptionurl"])
+
+    def test_verified_depiction_poster_can_replace_direct_photograph(self):
+        """A direct photo does not hide a better poster with its own work evidence."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )
+        self.entities["Q822850"] = fixture["work"]
+        self.search_ids = ["Q822850"]
+        photo = fixture["commons"]["query"]["pages"]["123"]
+        poster = fixture["poster"]
+        poster_info = poster["imageinfo"][0]
+
+        def source_response(url, params, **kwargs):
+            if "commons.wikimedia.org" not in url:
+                return self.source_response(url, params, **kwargs)
+            if params.get("list") == "search":
+                if mode == "outage":
+                    raise requests.Timeout
+                self.assertNotEqual(mode, "direct_poster")
+                payload = {
+                    "query": {"search": [{"pageid": 124, "title": poster["title"]}]}
+                }
+            elif params["action"] == "wbgetentities":
+                payload = {
+                    "entities": {
+                        "M124": {
+                            "statements": {
+                                "P180": [
+                                    {
+                                        "mainsnak": {
+                                            "datavalue": {
+                                                "value": {
+                                                    "id": "Q999"
+                                                    if mode == "wrong_work"
+                                                    else "Q822850"
+                                                }
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            elif "Work poster.png" in params.get("titles", ""):
+                payload = {"query": {"pages": {"124": poster}}}
+            else:
+                payload = fixture["commons"]
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(payload).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            for mode in (
+                "wrong_work",
+                "non_poster",
+                "film",
+                "rights_warning",
+                "outage",
+            ):
+                with self.subTest(mode=mode):
+                    cache.clear()
+                    poster_info["extmetadata"]["ImageDescription"]["value"] = {
+                        "non_poster": "Photograph of the theatrical performance",
+                        "film": "Poster for a film adaptation",
+                    }.get(mode, "Poster for The House of Bernarda Alba, a play")
+                    poster["templates"] = [
+                        {
+                            "title": "Template:Copyright violation"
+                            if mode == "rights_warning"
+                            else "Template:Cc-by-sa-4.0"
+                        }
+                    ]
+                    response = self.client.get(
+                        reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                    )
+                    artwork = response.context["data"]["results"][0]["item"][
+                        "theater_artwork"
+                    ]
+                    self.assertEqual(artwork["image"], photo["imageinfo"][0]["url"])
+                    self.assertEqual(artwork["evidence"], "P18/P154")
+                    self.assertContains(response, "Test Photographer")
+            mode = "verified"
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+            )
+            artwork = response.context["data"]["results"][0]["item"]["theater_artwork"]
+            self.assertEqual(artwork["image"], poster_info["url"])
+            self.assertEqual(artwork["evidence"], "P180")
+            self.assertContains(response, "Poster Artist")
+            self.client.post(
+                reverse("media_save"),
+                {
+                    "media_id": "Q822850",
+                    "source": "wikidata",
+                    "media_type": "theater",
+                    "status": "Planning",
+                },
+            )
+        saved = Item.objects.get(media_id="Q822850")
+        self.assertEqual(
+            (
+                saved.image,
+                saved.theater_artwork["source_url"],
+                saved.theater_artwork["evidence"],
+            ),
+            (poster_info["url"], poster_info["descriptionurl"], "P180"),
+        )
+
+        cache.clear()
+        mode = "direct_poster"
+        photo["imageinfo"][0]["extmetadata"]["ImageDescription"] = {
+            "value": "Poster for The House of Bernarda Alba, a play"
+        }
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+            )
+        artwork = response.context["data"]["results"][0]["item"]["theater_artwork"]
+        self.assertEqual(artwork["image"], photo["imageinfo"][0]["url"])
+        self.assertEqual(artwork["evidence"], "P18/P154")
+
+    def test_malformed_poster_discovery_keeps_direct_photo_and_retries(self):
+        """Unknown depiction evidence cannot break or permanently finish an upgrade."""
+        fixture = json.loads(
+            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+        )
+        self.entities["Q822850"] = fixture["work"]
+        self.search_ids = ["Q822850"]
+        poster = fixture["poster"]
+        bad_stage = ""
+        malformed = None
+
+        def source_response(url, params, **kwargs):
+            if "commons.wikimedia.org" not in url:
+                return self.source_response(url, params, **kwargs)
+            stage = (
+                "poster_file"
+                if "Work poster.png" in params.get("titles", "")
+                else ("search" if params.get("list") == "search" else params["action"])
+            )
+            if stage == bad_stage:
+                payload = malformed
+            elif stage == "search":
+                payload = {
+                    "query": {"search": [{"pageid": 124, "title": poster["title"]}]}
+                }
+            elif stage == "wbgetentities":
+                payload = {
+                    "entities": {
+                        "M124": {
+                            "statements": {
+                                "P180": [
+                                    {
+                                        "mainsnak": {
+                                            "datavalue": {"value": {"id": "Q822850"}}
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            elif "Work poster.png" in params.get("titles", ""):
+                payload = {"query": {"pages": {"124": poster}}}
+            else:
+                payload = fixture["commons"]
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(payload).encode()
+            return response
+
+        for stage, payload in (
+            ("poster_file", {"query": None}),
+            (
+                "wbgetentities",
+                {
+                    "entities": {
+                        "M124": {
+                            "statements": {
+                                "P180": [
+                                    {
+                                        "mainsnak": {
+                                            "datavalue": {"value": {"id": "not-a-qid"}}
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+            ),
+            (
+                "wbgetentities",
+                {
+                    "entities": {
+                        "M124": {
+                            "statements": {
+                                "P180": [
+                                    {
+                                        "mainsnak": {
+                                            "snaktype": [],
+                                            "datavalue": {"value": {"id": "Q822850"}},
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+            ),
+            ("search", None),
+            ("search", {}),
+            ("search", {"query": None}),
+            ("search", {"query": {"search": None}}),
+            ("search", {"query": {"search": [None]}}),
+            (
+                "search",
+                {
+                    "query": {
+                        "search": [{"pageid": "124", "title": "File:Work poster.png"}]
+                    }
+                },
+            ),
+            ("wbgetentities", {}),
+            ("wbgetentities", {"entities": {"M124": None}}),
+            ("wbgetentities", {"entities": {"M124": {"statements": None}}}),
+            ("wbgetentities", {"entities": {"M124": {"statements": {"P180": [None]}}}}),
+            (
+                "wbgetentities",
+                {"entities": {"M124": {"statements": {"P180": [{"mainsnak": None}]}}}},
+            ),
+        ):
+            with self.subTest(stage=stage, payload=payload):
+                cache.clear()
+                bad_stage, malformed = stage, payload
+                with patch(
+                    "app.providers.services.session.get", side_effect=source_response
+                ):
+                    response = self.client.get(
+                        reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                    )
+                    artwork = response.context["data"]["results"][0]["item"][
+                        "theater_artwork"
+                    ]
+                    self.assertEqual(artwork["evidence"], "P18/P154")
+                    self.assertContains(response, "Test Photographer")
+                    self.assertFalse(artwork["selection_complete"])
+                    bad_stage = ""
+                    recovered = self.client.get(
+                        reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                    )
+                    self.assertEqual(
+                        recovered.context["data"]["results"][0]["item"]["image"],
+                        poster["imageinfo"][0]["url"],
+                    )
 
     def test_depiction_enrichment_requires_exact_work_and_safe_credits(self):
         """Commons matching rejects other adaptations and warning-tagged files."""

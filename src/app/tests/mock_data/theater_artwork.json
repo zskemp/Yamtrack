@@ -9,6 +9,29 @@
       "P18": [{"mainsnak": {"datavalue": {"value": "Test stage photograph.jpg"}}}]
     }
   },
+  "poster": {
+    "pageid": 124,
+    "lastrevid": 201,
+    "title": "File:Work poster.png",
+    "templates": [{"title": "Template:Cc-by-sa-4.0"}],
+    "imageinfo": [{
+      "url": "https://thumb.wikimedia.org/wikipedia/commons/work-poster.png",
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/work-poster.png",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Work_poster.png",
+      "width": 600,
+      "height": 900,
+      "mime": "image/png",
+      "sha1": "test-poster-hash",
+      "extmetadata": {
+        "ImageDescription": {"value": "Poster for The House of Bernarda Alba, a play"},
+        "Artist": {"value": "Poster Artist"},
+        "Credit": {"value": "Own work"},
+        "LicenseShortName": {"value": "CC BY-SA 4.0"},
+        "LicenseUrl": {"value": "https://creativecommons.org/licenses/by-sa/4.0/"},
+        "Restrictions": {"value": ""}
+      }
+    }]
+  },
   "commons": {
     "query": {"pages": {"123": {
       "pageid": 123,

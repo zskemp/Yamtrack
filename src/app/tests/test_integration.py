@@ -202,22 +202,11 @@ class IntegrationTest(StaticLiveServerTestCase):
         fixture = json.loads(
             (Path(__file__).parent / "mock_data/theater_artwork.json").read_text()
         )
-        image_url = fixture["commons"]["query"]["pages"]["123"]["imageinfo"][0]["url"]
+        poster = fixture["poster"]
+        image_url = poster["imageinfo"][0]["url"]
         image = base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII="
         )
-
-        def source_response(url, params, **_kwargs):
-            if "commons.wikimedia.org" in url:
-                payload = fixture["commons"]
-            elif params["action"] == "query":
-                payload = {"query": {"search": [{"title": "Q822850"}]}}
-            else:
-                payload = {"entities": {"Q822850": fixture["work"]}}
-            response = requests.Response()
-            response.status_code = 200
-            response._content = json.dumps(payload).encode()
-            return response
 
         cache.clear()
         self.page.route(
@@ -225,7 +214,10 @@ class IntegrationTest(StaticLiveServerTestCase):
         )
         try:
             with patch(
-                "app.providers.services.session.get", side_effect=source_response
+                "app.providers.services.session.get",
+                side_effect=lambda url, params, **_kwargs: self._poster_source_response(
+                    fixture, url, params
+                ),
             ):
                 desktop_width = 1280
                 for width in (desktop_width, 390):
@@ -238,11 +230,12 @@ class IntegrationTest(StaticLiveServerTestCase):
                             "img", name="The House of Bernarda Alba", exact=True
                         )
                         picture.scroll_into_view_if_needed()
+                        expect(picture).to_have_attribute("src", image_url)
                         expect(picture).to_have_js_property("naturalWidth", 1)
                         expect(picture).to_have_css("object-fit", "contain")
                         self.page.get_by_text("Image credit", exact=True).click()
                         expect(
-                            self.page.get_by_text("Test Photographer", exact=False)
+                            self.page.get_by_text("Poster Artist", exact=False)
                         ).to_be_visible()
                         self.page.get_by_title(
                             "The House of Bernarda Alba", exact=True
@@ -273,19 +266,61 @@ class IntegrationTest(StaticLiveServerTestCase):
                                 " <= window.innerWidth"
                             )
                         )
-            picture = self.page.get_by_role(
-                "img", name="The House of Bernarda Alba", exact=True
-            )
-            frame = picture.bounding_box()
-            self.page.route(image_url, lambda route: route.abort())
-            self.page.reload()
-            picture.scroll_into_view_if_needed()
-            expect(picture).to_have_attribute("src", settings.IMG_NONE)
-            self.assertEqual(picture.bounding_box()["height"], frame["height"])
+            self._assert_failed_theater_image_keeps_frame(image_url)
         finally:
             self.page.unroute(image_url)
             self.page.set_viewport_size({"width": 1280, "height": 720})
             cache.clear()
+
+    def _assert_failed_theater_image_keeps_frame(self, image_url):
+        """Verify an unavailable image leaves the saved card's frame stable."""
+        picture = self.page.get_by_role(
+            "img", name="The House of Bernarda Alba", exact=True
+        )
+        frame = picture.bounding_box()
+        self.page.route(image_url, lambda route: route.abort())
+        self.page.reload()
+        picture.scroll_into_view_if_needed()
+        expect(picture).to_have_attribute("src", settings.IMG_NONE)
+        self.assertEqual(picture.bounding_box()["height"], frame["height"])
+
+    @staticmethod
+    def _poster_source_response(fixture, url, params):
+        """Serve independent work, photo, and exact-depiction poster HTTP fixtures."""
+        poster = fixture["poster"]
+        if "commons.wikimedia.org" in url:
+            if params.get("list") == "search":
+                payload = {
+                    "query": {"search": [{"pageid": 124, "title": poster["title"]}]}
+                }
+            elif params["action"] == "wbgetentities":
+                payload = {
+                    "entities": {
+                        "M124": {
+                            "statements": {
+                                "P180": [
+                                    {
+                                        "mainsnak": {
+                                            "datavalue": {"value": {"id": "Q822850"}}
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            elif "Work poster.png" in params.get("titles", ""):
+                payload = {"query": {"pages": {"124": poster}}}
+            else:
+                payload = fixture["commons"]
+        elif params["action"] == "query":
+            payload = {"query": {"search": [{"title": "Q822850"}]}}
+        else:
+            payload = {"entities": {"Q822850": fixture["work"]}}
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps(payload).encode()
+        return response
 
     def test_theater_category_image_search_to_library(self):
         """Category-backed images and credits remain usable at both viewport sizes."""

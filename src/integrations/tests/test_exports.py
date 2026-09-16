@@ -199,7 +199,11 @@ class TheaterExportRestoreTest(TestCase):
         content = b"".join(self.client.get(reverse("export_csv")).streaming_content)
         rows = list(csv.DictReader(StringIO(content.decode())))
         artwork = json.loads(rows[0]["theater_artwork"])
-        for policy, notices in ((6, ""), (8, artwork["notices"])):
+        for policy, notices in (
+            (6, ""),
+            (8, artwork["notices"]),
+            (9, artwork["notices"]),
+        ):
             with self.subTest(policy=policy):
                 legacy_artwork = {
                     **artwork,

@@ -23,10 +23,11 @@ from app.providers import services
 
 logger = logging.getLogger(__name__)
 BASE_URL = "https://commons.wikimedia.org/w/api.php"
-POLICY_VERSION = 9
+POLICY_VERSION = 10
 LEGACY_POLICY_VERSION = 3
 PD_ART_NOTICE_POLICY_VERSION = 8
 MIN_IMAGE_DIMENSION = 200
+NON_POSTER_RANK = 2
 DEPICTION_CANDIDATE_LIMIT = 12
 CATEGORY_CANDIDATE_LIMIT = 10
 CATEGORY_NAMESPACE = 14
@@ -458,6 +459,7 @@ def complete_credit(artwork):
         6,
         7,
         8,
+        9,
         POLICY_VERSION,
     }:
         return False
@@ -545,10 +547,50 @@ def request_data(params):
             )
         logger.warning("Commons artwork request failed")
         raise ArtworkUnavailableError from error
+    if not isinstance(response, dict):
+        raise ArtworkUnavailableError
     if "error" in response:
         cache.set("commons_retry_after", "limited", 60)
         raise ArtworkUnavailableError
     return response
+
+
+def depicts_work(entity, work_id):
+    """Validate concrete depiction evidence before treating it as a match or absence."""
+    if not isinstance(entity, dict):
+        raise ArtworkUnavailableError
+    if "missing" in entity:
+        return False
+    statements = entity.get("statements")
+    if not isinstance(statements, dict) or not isinstance(
+        statements.get("P180", []), list
+    ):
+        raise ArtworkUnavailableError
+    matched = False
+    for claim in statements.get("P180", []):
+        if not isinstance(claim, dict):
+            raise ArtworkUnavailableError
+        if claim.get("rank") == "deprecated":
+            continue
+        snak = claim.get("mainsnak")
+        if not isinstance(snak, dict) or snak.get("snaktype", "value") not in (
+            "value",
+            "somevalue",
+            "novalue",
+        ):
+            raise ArtworkUnavailableError
+        if snak.get("snaktype") in ("somevalue", "novalue"):
+            continue
+        data = snak.get("datavalue")
+        value = data.get("value") if isinstance(data, dict) else None
+        if (
+            not isinstance(value, dict)
+            or not isinstance(value.get("id"), str)
+            or not re.fullmatch(r"Q[1-9][0-9]*", value["id"])
+        ):
+            raise ArtworkUnavailableError
+        matched = matched or value["id"] == work_id
+    return matched
 
 
 def depicted_files(work_id):
@@ -562,7 +604,20 @@ def depicted_files(work_id):
             "srsearch": f"haswbstatement:P180={work_id}",
         }
     )
-    hits = response.get("query", {}).get("search", [])[:DEPICTION_CANDIDATE_LIMIT]
+    query = response.get("query")
+    hits = query.get("search") if isinstance(query, dict) else None
+    if not isinstance(hits, list):
+        raise ArtworkUnavailableError
+    hits = hits[:DEPICTION_CANDIDATE_LIMIT]
+    if any(
+        not isinstance(hit, dict)
+        or type(hit.get("pageid")) is not int
+        or hit["pageid"] <= 0
+        or not isinstance(hit.get("title"), str)
+        or not hit["title"].startswith("File:")
+        for hit in hits
+    ):
+        raise ArtworkUnavailableError
     if not hits:
         return []
     entities = request_data(
@@ -571,27 +626,20 @@ def depicted_files(work_id):
             "props": "claims",
             "ids": "|".join(f"M{hit['pageid']}" for hit in hits),
         }
-    ).get("entities", {})
+    ).get("entities")
+    if not isinstance(entities, dict):
+        raise ArtworkUnavailableError
     return [
         hit["title"].removeprefix("File:")
         for hit in hits
-        if any(
-            claim.get("rank") != "deprecated"
-            and claim.get("mainsnak", {})
-            .get("datavalue", {})
-            .get("value", {})
-            .get("id")
-            == work_id
-            for claim in entities.get(f"M{hit['pageid']}", {})
-            .get("statements", {})
-            .get("P180", [])
-        )
+        if depicts_work(entities.get(f"M{hit['pageid']}"), work_id)
     ]
 
 
 def merge_file_metadata(merged, response):
     """Reject malformed fragments before merging rights-bearing file metadata."""
-    pages = response.get("query", {}).get("pages")
+    query = response.get("query")
+    pages = query.get("pages") if isinstance(query, dict) else None
     if not isinstance(pages, dict) or not pages:
         raise ArtworkUnavailableError
     if merged and set(pages) != set(merged):
@@ -653,11 +701,24 @@ def image_pages(filenames):
         yield from merged.values()
 
 
-def artwork(work_id, filenames, revision, work_forms=(), *, category_context=None):
+def artwork(
+    work_id,
+    filenames,
+    revision,
+    work_forms=(),
+    *,
+    category_context=None,
+    prefer_posters=True,
+):
     """Preserve the distinction between unavailable and confirmed absent images."""
     try:
         return select_artwork(
-            work_id, filenames, revision, work_forms, category_context
+            work_id,
+            filenames,
+            revision,
+            work_forms,
+            category_context,
+            prefer_posters=prefer_posters,
         )
     except ArtworkUnavailableError:
         return None
@@ -912,7 +973,7 @@ def artwork_preference(candidate):
     ):
         poster_rank = 1
     else:
-        poster_rank = 2
+        poster_rank = NON_POSTER_RANK
     return (
         poster_rank,
         abs(candidate["width"] / candidate["height"] - 2 / 3),
@@ -920,7 +981,15 @@ def artwork_preference(candidate):
     )
 
 
-def select_artwork(work_id, filenames, revision, work_forms, category_context=None):
+def select_artwork(
+    work_id,
+    filenames,
+    revision,
+    work_forms,
+    category_context=None,
+    *,
+    prefer_posters=True,
+):
     """Select a reusable work image from at most five direct candidates."""
     filenames = list(
         dict.fromkeys(filename for filename in filenames if isinstance(filename, str))
@@ -932,18 +1001,32 @@ def select_artwork(work_id, filenames, revision, work_forms, category_context=No
         and cached.get("work_revision") == revision
         and cached.get("work_forms") == list(work_forms)
     ):
-        return cached
-    candidates, unavailable = verified_candidates(filenames, work_forms)
-    evidence = "P18/P154"
-    if not candidates:
-        evidence = "P180"
-        candidates, depiction_unavailable = depiction_candidates(work_id, work_forms)
+        if not prefer_posters or cached.get("poster_search_complete"):
+            return cached
+        candidates, unavailable = [cached.copy()], False
+    else:
+        candidates, unavailable = verified_candidates(filenames, work_forms)
+        for candidate in candidates:
+            candidate["evidence"] = "P18/P154"
+    has_poster = any(
+        artwork_preference(candidate)[0] < NON_POSTER_RANK for candidate in candidates
+    )
+    if not candidates or (prefer_posters and not has_poster):
+        depictions, depiction_unavailable = depiction_candidates(work_id, work_forms)
+        candidates.extend(
+            [
+                {**candidate, "evidence": "P180"}
+                for candidate in depictions
+                if not candidates or artwork_preference(candidate)[0] < NON_POSTER_RANK
+            ]
+        )
         unavailable = unavailable or depiction_unavailable
     if not candidates:
-        evidence = "P373/description"
         candidates, category_unavailable = category_candidates(
             work_id, category_context, work_forms
         )
+        for candidate in candidates:
+            candidate["evidence"] = "P373/description"
         unavailable = unavailable or category_unavailable
     if not candidates and unavailable:
         raise ArtworkUnavailableError
@@ -953,9 +1036,11 @@ def select_artwork(work_id, filenames, revision, work_forms, category_context=No
         selected.update(
             work_id=work_id,
             work_revision=revision,
-            evidence=evidence,
             work_forms=list(work_forms),
             selection_complete=not unavailable,
+            poster_search_complete=prefer_posters
+            or has_poster
+            or selected["evidence"] != "P18/P154",
         )
         if not unavailable:
             cache.set(key, selected, 3600)

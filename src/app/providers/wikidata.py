@@ -400,7 +400,7 @@ def hydrate(work_entities):
     ]
 
 
-def illustrate(work):
+def illustrate(work, *, prefer_posters=True):
     """Attach image and credit together after work selection and pagination."""
     work = work.copy()
     artwork = commons.artwork(
@@ -409,6 +409,7 @@ def illustrate(work):
         work.get("work_revision"),
         work["theater_forms"],
         category_context=work.get("artwork_category_context"),
+        prefer_posters=prefer_posters,
     )
     work["artwork_unavailable"] = artwork is None
     work["artwork_partial"] = bool(artwork) and not artwork.get(
@@ -540,14 +541,21 @@ def search(query, page):
         else:
             canonical_results[canonical_id] = work
     results = list(canonical_results.values())
+    displayed = results[(page - 1) * PAGE_SIZE : page * PAGE_SIZE]
+    illustrated = [illustrate(work, prefer_posters=False) for work in displayed]
+    for index, work in enumerate(illustrated):
+        artwork = work["theater_artwork"]
+        if (
+            artwork
+            and not work["artwork_partial"]
+            and not artwork.get("poster_search_complete")
+        ):
+            illustrated[index] = illustrate(displayed[index])
     response = helpers.format_search_response(
         page,
         PAGE_SIZE,
         len(results),
-        [
-            illustrate(work)
-            for work in results[(page - 1) * PAGE_SIZE : page * PAGE_SIZE]
-        ],
+        illustrated,
     )
     response["limited"] = cached["limited"]
     return response
