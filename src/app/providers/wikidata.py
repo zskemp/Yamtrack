@@ -50,6 +50,8 @@ MAX_BATCHES = 3
 CLASSIFICATION_VERSION = 5
 CLASS_DEPTH_LIMIT = 3
 CLASS_COUNT_LIMIT = 50
+LABEL_VERSION = 1
+LABEL_BATCH_LIMIT = 50
 TYPE_PROPERTIES = ("P31", "P7937", "P136")
 TYPE_ANCHORS = set(WORK_IDS) | set(GENRE_FORMS) | EXCLUDED_TYPES
 
@@ -66,10 +68,16 @@ def request_data(params):
         )
     except requests.RequestException as error:
         raise services.ProviderAPIError(Sources.WIKIDATA.value, error) from error
-    if "error" in data:
+    if not isinstance(data, dict) or "error" in data:
+        error = data.get("error") if isinstance(data, dict) else None
+        message = (
+            error.get("info", "Invalid API response")
+            if isinstance(error, dict)
+            else "Invalid API response"
+        )
         raise services.ProviderAPIError(
             Sources.WIKIDATA.value,
-            ValueError(data["error"].get("info", "Invalid API response")),
+            ValueError(message),
         )
     return data
 
@@ -237,7 +245,7 @@ def forms(entity):
 def label(entity):
     """Read a display label, preserving the provider's language fallback."""
     labels = entity.get("labels", {})
-    return labels.get("en", next(iter(labels.values()), {})).get(
+    return labels.get("en", labels[min(labels)] if labels else {}).get(
         "value", entity.get("id", "")
     )
 
@@ -313,6 +321,7 @@ def transform(entity, related):
         },
         "work_revision": entity.get("lastrevid"),
         "classification_version": CLASSIFICATION_VERSION,
+        "label_version": LABEL_VERSION,
         "theater_forms": work_forms,
         "work_description": " / ".join([details["forms"], *dict.fromkeys(creators)]),
         "synopsis": entity.get("descriptions", {})
@@ -326,6 +335,55 @@ def transform(entity, related):
     }
 
 
+def hydrate_labels(records):
+    """Fill missing display labels in one optional batch without changing claims."""
+    pending = {}
+    for entity in records:
+        if entity.get("labels") or "missing" in entity:
+            continue
+        identifier = entity["id"]
+        cached = cache.get(f"wikidata_labels_v{LABEL_VERSION}_{identifier}")
+        if cached is not None:
+            entity["labels"] = cached
+        else:
+            pending.setdefault(identifier, []).append(entity)
+    if not pending:
+        return False
+    requested = list(pending)[:LABEL_BATCH_LIMIT]
+    try:
+        response = request_data(
+            {"action": "wbgetentities", "ids": "|".join(requested), "props": "labels"}
+        )
+    except services.ProviderAPIError:
+        return True
+    returned = response.get("entities", {})
+    incomplete = len(pending) > LABEL_BATCH_LIMIT
+    for identifier in requested:
+        entity = returned.get(identifier, {}) if isinstance(returned, dict) else {}
+        labels = entity.get("labels") if isinstance(entity, dict) else None
+        if (
+            not isinstance(entity, dict)
+            or entity.get("id") != identifier
+            or not isinstance(labels, dict)
+        ):
+            incomplete = True
+            continue
+        valid_labels = {
+            language: entry
+            for language, entry in labels.items()
+            if isinstance(entry, dict)
+            and isinstance(entry.get("value"), str)
+            and entry["value"].strip()
+        }
+        if len(valid_labels) != len(labels):
+            incomplete = True
+            continue
+        cache.set(f"wikidata_labels_v{LABEL_VERSION}_{identifier}", valid_labels, 3600)
+        for record in pending[identifier]:
+            record["labels"] = valid_labels
+    return incomplete
+
+
 def hydrate(work_entities):
     """Hydrate labels once per batch of eligible works."""
     references = [
@@ -335,7 +393,11 @@ def hydrate(work_entities):
         for identifier in identifiers(entity, property_id)
     ]
     related = entities(references)
-    return [transform(entity, related) for entity in work_entities]
+    incomplete = hydrate_labels([*work_entities, *related.values()])
+    return [
+        {**transform(entity, related), "labels_incomplete": incomplete}
+        for entity in work_entities
+    ]
 
 
 def illustrate(work):
@@ -374,6 +436,7 @@ def theater(media_id):
         cached is not None
         and cached.get("artwork_policy") == commons.POLICY_VERSION
         and cached.get("classification_version") == CLASSIFICATION_VERSION
+        and cached.get("label_version") == LABEL_VERSION
     ):
         return cached
     entity = entities([media_id]).get(media_id, {})
@@ -384,7 +447,10 @@ def theater(media_id):
         )
     theater_identity.record_redirect(media_id, entity)
     result = illustrate(hydrate([entity])[0])
-    if not result.get("artwork_unavailable") and not result.get("artwork_partial"):
+    if not any(
+        result.get(key)
+        for key in ("artwork_unavailable", "artwork_partial", "labels_incomplete")
+    ):
         cache.set(f"wikidata_theater_{result['media_id']}", result, 3600)
     return result
 
@@ -412,7 +478,7 @@ def select_search_batch(params, selected, type_graph, *, optional=False):
 def search(query, page):
     """Filter a bounded candidate window before canonical result pagination."""
     literal = " ".join(query.split())[:200]
-    key = f"wikidata_search_v10_{literal}"
+    key = f"wikidata_search_v11_{literal}"
     cached = cache.get(key)
     if cached is None:
         escaped = literal.replace("\\", "\\\\").replace('"', '\\"')
@@ -454,7 +520,9 @@ def search(query, page):
             or bool(continuation)
             or len(type_graph) >= CLASS_COUNT_LIMIT,
         }
-        if not incomplete:
+        if not incomplete and not any(
+            work.get("labels_incomplete") for work in results
+        ):
             cache.set(key, cached, 900)
     page = max(1, page)
     canonical_results = {}

@@ -218,6 +218,204 @@ class TheaterDiscoveryTests(TestCase):
         response._content = json.dumps(data).encode()
         return response
 
+    def test_missing_english_labels_use_source_language_without_changing_identity(self):
+        """A work and its creator can display source labels when English is absent."""
+        self.entities["Q105448367"] = {
+            **self.entities["Q19320959"],
+            "id": "Q105448367",
+            "labels": {},
+        }
+        self.entities["Q1646482"]["labels"] = {}
+        self.search_ids = ["Q105448367"]
+        requested_labels = []
+
+        def source_response(url, params, **kwargs):
+            if (
+                url == "https://www.wikidata.org/w/api.php"
+                and params.get("props") == "labels"
+            ):
+                requested_labels.append(params)
+                response = requests.Response()
+                response.status_code = 200
+                response._content = json.dumps(
+                    {
+                        "entities": {
+                            "Q105448367": {
+                                "id": "Q105448367",
+                                "labels": {"nl": {"value": "Dear Fox"}},
+                            },
+                            "Q1646482": {
+                                "id": "Q1646482",
+                                "labels": {"es": {"value": "Nombre del autor"}},
+                            },
+                        }
+                    }
+                ).encode()
+                return response
+            return self.source_response(url, params, **kwargs)
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            response = self.client.get(
+                reverse("search"), {"media_type": "theater", "q": "Dear"}
+            )
+            self.assertContains(response, "Dear Fox")
+            self.assertContains(response, "Nombre del autor")
+            details = self.client.get(
+                reverse(
+                    "media_details",
+                    args=["wikidata", "theater", "Q105448367", "dear-fox"],
+                )
+            )
+            self.assertContains(details, "Dear Fox")
+            self.client.post(
+                reverse("media_save"),
+                {
+                    "media_id": "Q105448367",
+                    "source": "wikidata",
+                    "media_type": "theater",
+                    "status": "Planning",
+                },
+            )
+        self.assertEqual(Item.objects.get(media_id="Q105448367").title, "Dear Fox")
+        self.assertEqual(len(requested_labels), 1)
+        self.assertNotIn("languages", requested_labels[0])
+
+    def test_label_fallback_failure_preserves_work_and_recovers_without_cache_delay(
+        self,
+    ):
+        """Optional labels cannot erase works or change their provider identities."""
+        self.entities["Q19320959"]["labels"] = {}
+        self.search_ids = ["Q19320959"]
+        label_payload = None
+
+        def source_response(url, params, **kwargs):
+            if (
+                url == "https://www.wikidata.org/w/api.php"
+                and params.get("props") == "labels"
+            ):
+                if label_payload == "timeout":
+                    raise requests.Timeout
+                response = requests.Response()
+                response.status_code = 200
+                response._content = json.dumps(label_payload).encode()
+                return response
+            return self.source_response(url, params, **kwargs)
+
+        for payload in (
+            "timeout",
+            None,
+            False,
+            42,
+            [],
+            {"error": []},
+            {"error": None},
+            {
+                "entities": {
+                    "Q19320959": {"id": "Q19320959", "labels": {"nl": {"value": None}}}
+                }
+            },
+            {"entities": {"Q19320959": []}},
+            {
+                "entities": {
+                    "Q19320959": {
+                        "id": "Q999",
+                        "labels": {"en": {"value": "Wrong work"}},
+                    }
+                }
+            },
+        ):
+            with self.subTest(payload=payload):
+                cache.clear()
+                label_payload = payload
+                with patch(
+                    "app.providers.services.session.get", side_effect=source_response
+                ):
+                    response = self.client.get(
+                        reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    selected = response.context["data"]["results"][0]["item"]
+                    self.assertEqual(selected["media_id"], "Q19320959")
+                    self.assertEqual(selected["title"], "Q19320959")
+                    label_payload = {
+                        "entities": {
+                            "Q19320959": {
+                                "id": "Q19320959",
+                                "labels": {"fr": {"value": "Hamilton"}},
+                            }
+                        }
+                    }
+                    recovered = self.client.get(
+                        reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                    )
+                    self.assertEqual(
+                        recovered.context["data"]["results"][0]["item"]["title"],
+                        "Hamilton",
+                    )
+        self.assertFalse(TheaterRedirect.objects.exists())
+
+    def test_missing_label_lookup_is_bounded_without_hiding_works(self):
+        """A later request can finish labels beyond one bounded batch."""
+        self.search_ids = [f"Q{99100 + number}" for number in range(51)]
+        for identifier in self.search_ids:
+            self.entities[identifier] = {
+                **self.entities["Q19320959"],
+                "id": identifier,
+                "labels": {},
+            }
+        label_batches = []
+
+        def source_response(url, params, **kwargs):
+            if (
+                url == "https://www.wikidata.org/w/api.php"
+                and params.get("props") == "labels"
+            ):
+                requested = params["ids"].split("|")
+                label_batches.append(requested)
+                payload = {
+                    "entities": {
+                        identifier: {
+                            "id": identifier,
+                            "labels": {"nl": {"value": f"Stage {identifier}"}},
+                        }
+                        for identifier in requested
+                    }
+                }
+            elif (
+                url == "https://www.wikidata.org/w/api.php"
+                and params.get("list") == "search"
+            ):
+                offset = params.get("sroffset", 0)
+                payload = {
+                    "query": {
+                        "search": [
+                            {"title": identifier}
+                            for identifier in self.search_ids[offset : offset + 50]
+                        ]
+                    }
+                }
+                if not offset:
+                    payload["continue"] = {"sroffset": 50}
+            else:
+                return self.source_response(url, params, **kwargs)
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(payload).encode()
+            return response
+
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            for expected_title in ("Q99150", "Stage Q99150"):
+                response = self.client.get(
+                    reverse("search"),
+                    {"media_type": "theater", "q": "Stage", "page": 3},
+                )
+                self.assertEqual(response.context["data"]["total_results"], 51)
+                self.assertEqual(
+                    response.context["data"]["results"][-1]["item"]["title"],
+                    expected_title,
+                )
+        self.assertEqual([len(batch) for batch in label_batches], [50, 1])
+
     def test_mixed_stage_work_remains_discoverable_without_staging_fingerprint(self):
         """A directly classified musical/work remains trackable with a mixed type."""
         self.entities["Q20899421"] = {

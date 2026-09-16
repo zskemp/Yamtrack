@@ -441,7 +441,7 @@ class IntegrationTest(StaticLiveServerTestCase):
                     "Q98002": work_type,
                     "Q98003": {
                         "id": "Q98003",
-                        "labels": {"en": {"value": "Regional Play"}},
+                        "labels": {},
                         "claims": {
                             "P31": [
                                 {"mainsnak": {"datavalue": {"value": {"id": "Q25379"}}}}
@@ -455,6 +455,15 @@ class IntegrationTest(StaticLiveServerTestCase):
                         for identifier in params["ids"].split("|")
                     }
                 }
+                if params.get("props") == "labels":
+                    payload = {
+                        "entities": {
+                            "Q98003": {
+                                "id": "Q98003",
+                                "labels": {"nl": {"value": "Regional Play"}},
+                            }
+                        }
+                    }
             response = requests.Response()
             response.status_code = 200
             response._content = json.dumps(payload).encode()

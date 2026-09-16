@@ -70,6 +70,19 @@ responses terminate the request rather than retry indefinitely. Saved attendance
 status and notes can be edited without an external metadata lookup.
 Theater works do not generate release-calendar events.
 
+When the English/fallback response has no label, eligible works and their related
+creators/languages share one optional label-only request of at most 50 IDs. Work
+titles take priority over related labels. The response may supply any language;
+English wins if present, otherwise the lowest language code is chosen for stable
+display. Source titles are not translated or inferred. Each label result is cached
+for one hour, including confirmed absence. Remaining works keep their QID and stay
+visible; a later request can use cached labels to reach further missing labels.
+Failures and malformed/mismatched entity records do not block tracking, and
+incomplete label enrichment prevents caching the final search/detail response.
+Only labels are read from this fallback; it cannot change claims or establish
+redirects. Label metadata version 1 and search cache version 11 refresh old
+QID-only results.
+
 ## Artwork
 
 Commons images are eligible through a work's direct P18 image/P154 logo claim or verified
