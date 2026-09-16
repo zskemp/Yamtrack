@@ -2207,6 +2207,97 @@ class TheaterDiscoveryTests(TestCase):
             )
             self.assertEqual(response.context["data"]["results"], [])
 
+    def test_cross_medium_genres_preserve_independently_identified_stage_works(self):
+        """Shared genre ancestry must not turn stage works into film records."""
+        self.entities["Q643684"] = {
+            "id": "Q643684",
+            "lastrevid": 100,
+            "claims": {
+                "P279": [
+                    {"mainsnak": {"datavalue": {"value": {"id": parent}}}}
+                    for parent in ("Q2743", "Q842256")
+                ]
+            },
+        }
+        self.entities["Q842256"] = {
+            "id": "Q842256",
+            "lastrevid": 100,
+            "claims": {
+                "P279": [{"mainsnak": {"datavalue": {"value": {"id": "Q11424"}}}}]
+            },
+        }
+        self.entities["Q99001"] = {
+            "id": "Q99001",
+            "lastrevid": 100,
+            "claims": {
+                "P279": [{"mainsnak": {"datavalue": {"value": {"id": "Q11424"}}}}]
+            },
+        }
+        cases = (
+            ("P7937", "Q643684", ["Q58483083"], ["Q2743"], True),
+            ("P136", "Q643684", ["Q58483083"], ["Q2743"], True),
+            ("P136", "Q99001", ["Q7725634"], ["Q25379"], True),
+            ("P136", "Q643684", ["Q11424"], ["Q2743"], False),
+            ("P136", "Q643684", ["Q5398426"], ["Q2743"], False),
+            ("P136", "Q643684", ["Q482994"], ["Q2743"], False),
+            ("P136", "Q643684", ["Q58483083", "Q11424"], ["Q2743"], False),
+            ("P7937", "Q842256", ["Q58483083"], ["Q2743"], False),
+            ("P136", "Q11424", ["Q58483083"], ["Q2743"], False),
+            ("P136", "Q7777570", ["Q58483083"], ["Q2743"], False),
+            ("P136", "Q643684", ["Q99002"], ["Q2743"], False),
+        )
+        self.search_ids = []
+        expected = []
+        for index, (prop, genre, types, forms, accepted) in enumerate(cases):
+            identifier = f"Q880{index}"
+            claims = {"P31": types, "P7937": forms}
+            claims.setdefault(prop, []).append(genre)
+            self.entities[identifier] = {
+                "id": identifier,
+                "lastrevid": 200,
+                "labels": {"en": {"value": f"Stage candidate {index}"}},
+                "claims": {
+                    field: [
+                        {"mainsnak": {"datavalue": {"value": {"id": value}}}}
+                        for value in values
+                    ]
+                    for field, values in claims.items()
+                },
+            }
+            self.search_ids.append(identifier)
+            if accepted:
+                expected.append(identifier)
+        response = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "stage"}
+        )
+        self.assertEqual(
+            [
+                result["item"]["media_id"]
+                for result in response.context["data"]["results"]
+            ],
+            expected,
+        )
+        for identifier in expected:
+            self.client.post(
+                reverse("media_save"),
+                {
+                    "media_id": identifier,
+                    "source": "wikidata",
+                    "media_type": "theater",
+                    "status": "Planning",
+                    "notes": "Stage work remains trackable",
+                },
+            )
+            details = self.client.get(
+                reverse(
+                    "media_details", args=["wikidata", "theater", identifier, "stage"]
+                )
+            )
+            self.assertContains(details, "Stage work remains trackable")
+        self.assertEqual(
+            set(Theater.objects.values_list("item__media_id", flat=True)), set(expected)
+        )
+
     def test_form_and_genre_subtypes_cannot_hide_medium_conflicts(self):
         """Production ancestry in any classification property overrides a form."""
         self.entities["Q99201"] = {

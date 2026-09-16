@@ -47,13 +47,14 @@ CREATOR_ROLES = {
 }
 PAGE_SIZE = 20
 MAX_BATCHES = 3
-CLASSIFICATION_VERSION = 6
+CLASSIFICATION_VERSION = 7
 CLASS_DEPTH_LIMIT = 3
 CLASS_COUNT_LIMIT = 50
 LABEL_VERSION = 1
 LABEL_BATCH_LIMIT = 50
 TYPE_PROPERTIES = ("P31", "P7937", "P136")
 TYPE_ANCHORS = set(WORK_IDS) | set(GENRE_FORMS) | EXCLUDED_TYPES
+SCREEN_TYPES = {"Q11424", "Q5398426"}
 
 
 def request_data(params):
@@ -205,7 +206,7 @@ def type_evidence(entity, property_id):
 
 
 def has_type_conflict(entity):
-    """Allow only a direct theatrical-production type beside a direct stage work."""
+    """Distinguish explicit medium conflicts from cross-medium genre ancestry."""
     direct_stage_work = STAGE_WORK_IDS.intersection(identifiers(entity, "P31"))
     for property_id in TYPE_PROPERTIES:
         direct_types = identifiers(entity, property_id)
@@ -215,9 +216,26 @@ def has_type_conflict(entity):
         for identifier, anchors in zip(direct_types, resolved, strict=True):
             if property_id == "P31" and identifier == "Q7777570" and direct_stage_work:
                 continue
-            if anchors and EXCLUDED_TYPES.intersection(anchors):
+            conflicts = EXCLUDED_TYPES.intersection(anchors or ())
+            if inherited_screen_genre(entity, property_id, identifier, anchors):
+                conflicts -= SCREEN_TYPES
+            if conflicts:
                 return True
     return False
+
+
+def inherited_screen_genre(entity, property_id, identifier, anchors):
+    """Permit shared genres only alongside independent direct stage evidence."""
+    if property_id == "P31" or identifier in EXCLUDED_TYPES or not anchors:
+        return False
+    direct_types = set(identifiers(entity, "P31"))
+    stage_identity = bool(STAGE_WORK_IDS.intersection(direct_types)) or (
+        "Q7725634" in direct_types
+        and bool(set(FORM_IDS).intersection(identifiers(entity, "P7937")))
+    )
+    return stage_identity and (
+        property_id == "P136" or bool(set(FORM_IDS).intersection(anchors))
+    )
 
 
 def forms(entity):
@@ -517,7 +535,7 @@ def select_search_batch(params, selected, type_graph, *, optional=False):
 def search(query, page):
     """Filter a bounded candidate window before canonical result pagination."""
     literal = " ".join(query.split())[:200]
-    key = f"wikidata_search_v13_{literal}"
+    key = f"wikidata_search_v14_{literal}"
     cached = cache.get(key)
     if cached is None:
         escaped = literal.replace("\\", "\\\\").replace('"', '\\"')

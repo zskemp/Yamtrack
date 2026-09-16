@@ -52,8 +52,20 @@ staging metadata is incomplete; it is not proof that every accepted entity is a
 work. Explicit English descriptions of venues or staged performances and a combined
 director/translator/based-on staging pattern also exclude records. These checks
 do not infer identity from titles or guarantee accurate classification when source
-evidence is incomplete. Classification version 6 and search cache version 13
+evidence is incomplete. Classification version 7 and search cache version 14
 refresh older results.
+
+Genre ancestry is not always work-medium evidence: jukebox musical, for example,
+can descend from both stage musical and musical film in the source ontology.
+An inherited film or TV-series conflict in P136 genre is ignored only alongside
+independent direct stage-work P31 evidence, or literary-work P31 plus a direct
+recognized stage form in P7937. For P7937 form ancestry, the same exception also
+requires that the ancestry resolves to a recognized stage form. Genre evidence
+alone never supplies that independent identity. Explicit excluded type statements,
+P31 medium conflicts, production/performance conflicts and staging fingerprints
+still reject the record. This preserves genuine stage works without admitting
+their film or television adaptations or merging distinct authored versions.
+
 Class parents and source revisions are cached for one hour. Search and details use
 the same classification version. When statement-filtered discovery is exhausted
 with fewer than 20 eligible works and request budget remains, one literal
