@@ -47,7 +47,7 @@ CREATOR_ROLES = {
 }
 PAGE_SIZE = 20
 MAX_BATCHES = 3
-CLASSIFICATION_VERSION = 7
+CLASSIFICATION_VERSION = 8
 CLASS_DEPTH_LIMIT = 3
 CLASS_COUNT_LIMIT = 50
 LABEL_VERSION = 1
@@ -224,16 +224,20 @@ def has_type_conflict(entity):
     return False
 
 
+def has_direct_stage_identity(entity):
+    """Require direct stage-work evidence independently of production credits."""
+    direct_types = set(identifiers(entity, "P31"))
+    return bool(STAGE_WORK_IDS.intersection(direct_types)) or (
+        "Q7725634" in direct_types
+        and bool(set(FORM_IDS).intersection(identifiers(entity, "P7937")))
+    )
+
+
 def inherited_screen_genre(entity, property_id, identifier, anchors):
     """Permit shared genres only alongside independent direct stage evidence."""
     if property_id == "P31" or identifier in EXCLUDED_TYPES or not anchors:
         return False
-    direct_types = set(identifiers(entity, "P31"))
-    stage_identity = bool(STAGE_WORK_IDS.intersection(direct_types)) or (
-        "Q7725634" in direct_types
-        and bool(set(FORM_IDS).intersection(identifiers(entity, "P7937")))
-    )
-    return stage_identity and (
+    return has_direct_stage_identity(entity) and (
         property_id == "P136" or bool(set(FORM_IDS).intersection(anchors))
     )
 
@@ -251,7 +255,7 @@ def forms(entity):
         anchors is None for anchors in entity.get("resolved_types", {}).get("P31", [])
     ):
         return []
-    if values(entity, "P272") and values(entity, "P161") and values(entity, "P57"):
+    if production_credits_without_work_identity(entity):
         return []
     evidence = type_evidence(entity, "P7937") + types
     classified = [FORM_IDS[value] for value in evidence if value in FORM_IDS]
@@ -263,6 +267,17 @@ def forms(entity):
         )
     named_forms = [form for form in classified if form != "other"]
     return list(dict.fromkeys(named_forms or classified))
+
+
+def production_credits_without_work_identity(entity):
+    """Do not mistake premiere personnel for sufficient production-only evidence."""
+    has_production_credits = all(
+        values(entity, prop) for prop in ("P272", "P161", "P57")
+    )
+    return has_production_credits and (
+        not has_direct_stage_identity(entity)
+        or bool(EXCLUDED_TYPES.intersection(identifiers(entity, "P31")))
+    )
 
 
 def describes_non_work(entity):
@@ -535,7 +550,7 @@ def select_search_batch(params, selected, type_graph, *, optional=False):
 def search(query, page):
     """Filter a bounded candidate window before canonical result pagination."""
     literal = " ".join(query.split())[:200]
-    key = f"wikidata_search_v15_{literal}"
+    key = f"wikidata_search_v16_{literal}"
     cached = cache.get(key)
     if cached is None:
         escaped = literal.replace("\\", "\\\\").replace('"', '\\"')

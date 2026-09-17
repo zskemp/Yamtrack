@@ -1641,6 +1641,104 @@ class TheaterDiscoveryTests(TestCase):
                     )
                     self.assertFalse(Theater.objects.filter(user=self.user).exists())
 
+    def test_stage_work_credits_do_not_require_a_separate_production_identity(self):
+        """Original-production credits may coexist with independent work evidence."""
+
+        def claim(identifier):
+            return {"mainsnak": {"datavalue": {"value": {"id": identifier}}}}
+
+        self.entities["Q99101"] = {
+            "id": "Q99101",
+            "lastrevid": 100,
+            "claims": {"P279": [claim("Q25379")]},
+        }
+        cases = (
+            (
+                "The History Boys",
+                ["Q7725634"],
+                ["Q25379"],
+                "play by Alan Bennett",
+                True,
+            ),
+            ("Frozen", ["Q58483083"], ["Q2743"], "stage musical", True),
+            (
+                "Mixed production",
+                ["Q58483083", "Q7777570"],
+                ["Q2743"],
+                "musical",
+                False,
+            ),
+            ("Film", ["Q11424"], ["Q25379"], "film", False),
+            ("TV", ["Q5398426"], ["Q25379"], "television series", False),
+            (
+                "Performance",
+                ["Q58483083"],
+                ["Q2743"],
+                "musical performance at a theatre",
+                False,
+            ),
+            (
+                "Venue",
+                ["Q7725634"],
+                ["Q25379"],
+                "a performing arts center in London",
+                False,
+            ),
+            ("Subtype only", ["Q99101"], [], "play", False),
+            ("Literary only", ["Q7725634"], [], "literary work", False),
+        )
+        self.search_ids = []
+        expected = []
+        for index, (title, types, forms, description, accepted) in enumerate(cases):
+            identifier = f"Q881{index}"
+            self.entities[identifier] = {
+                "id": identifier,
+                "lastrevid": 200,
+                "labels": {"en": {"value": title}},
+                "descriptions": {"en": {"value": description}},
+                "claims": {
+                    "P31": [claim(value) for value in types],
+                    "P7937": [claim(value) for value in forms],
+                    "P272": [claim("Q80001")],
+                    "P161": [claim("Q80002")],
+                    "P57": [claim("Q80003")],
+                },
+            }
+            self.search_ids.append(identifier)
+            if accepted:
+                expected.append(identifier)
+        response = self.client.get(
+            reverse("search"), {"media_type": "theater", "q": "stage"}
+        )
+        self.assertEqual(
+            [
+                result["item"]["media_id"]
+                for result in response.context["data"]["results"]
+            ],
+            expected,
+        )
+        for identifier in expected:
+            self.client.post(
+                reverse("media_save"),
+                {
+                    "source": "wikidata",
+                    "media_type": "theater",
+                    "media_id": identifier,
+                    "status": "Planning",
+                    "notes": "My visit",
+                },
+            )
+            details = self.client.get(
+                reverse(
+                    "media_details", args=["wikidata", "theater", identifier, "stage"]
+                )
+            )
+            self.assertContains(details, "My visit")
+        self.assertEqual(
+            set(Theater.objects.values_list("item__media_id", flat=True)), set(expected)
+        )
+        self.assertFalse(TheaterRedirect.objects.exists())
+
     def test_mixed_stage_work_remains_discoverable_without_staging_fingerprint(self):
         """A directly classified musical/work remains trackable with a mixed type."""
         self.entities["Q20899421"] = {
@@ -3028,7 +3126,7 @@ class TheaterDiscoveryTests(TestCase):
         self.assertFalse(TheaterRedirect.objects.exists())
 
     def test_named_source_relationships_do_not_create_speculative_equivalence(self):
-        """Real staging/derivation records retain their supported granularity."""
+        """Accepted duplicate-looking work records remain separate without redirects."""
         records = [
             (
                 "Q300532",
@@ -3101,9 +3199,9 @@ class TheaterDiscoveryTests(TestCase):
                 result["item"]["media_id"]
                 for result in response.context["data"]["results"]
             ],
-            ["Q300532", "Q199786", "Q1044928", "Q193705", "Q7754522"],
+            ["Q300532", "Q105430183", "Q199786", "Q1044928", "Q193705", "Q7754522"],
         )
-        for identifier in ("Q199786", "Q1044928", "Q193705", "Q7754522"):
+        for identifier in self.search_ids:
             self.client.post(
                 reverse("media_save"),
                 {
@@ -3113,8 +3211,8 @@ class TheaterDiscoveryTests(TestCase):
                     "status": "Completed",
                 },
             )
-        self.assertEqual(Theater.objects.filter(user=self.user).count(), 4)
-        self.assertEqual(Item.objects.filter(media_type="theater").count(), 4)
+        self.assertEqual(Theater.objects.filter(user=self.user).count(), 6)
+        self.assertEqual(Item.objects.filter(media_type="theater").count(), 6)
         self.assertFalse(TheaterRedirect.objects.exists())
 
     def test_us_public_domain_assessment_preserves_jurisdiction_and_source(self):

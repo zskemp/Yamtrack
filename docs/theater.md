@@ -44,15 +44,22 @@ One direct-type exception permits a theatrical-production P31 statement alongsid
 a direct reviewed stage-work P31 statement. Literary work alone and subtype-only
 work evidence do not qualify for this exception. Production subclasses, production
 claims in form/genre fields, performing-arts productions, performances and screen
-media remain excluded. A producer-plus-cast-plus-director fingerprint excludes
-the record even with direct stage-work evidence. This admits mixed records such
-as Dear Evan Hansen without title-specific exceptions or merging identities.
+media remain excluded. Producer, cast and director credits together no longer
+exclude an independently identified stage work: that requires direct stage-work
+P31, or literary-work P31 plus a direct recognized stage form in P7937, with no
+explicit excluded P31. Without that independent evidence, the credit fingerprint
+still excludes the record. Explicit production types combined with these credits
+also remain excluded. This recovers works whose source records include premiere
+personnel, such as The History Boys and Frozen, without title-specific exceptions.
+It deliberately tolerates some additional staging or duplicate-looking records
+whose source evidence is indistinguishable from a work; these remain separate
+identities unless a verified redirect establishes equivalence.
 It favors discoverability but can admit incorrectly classified productions whose
 staging metadata is incomplete; it is not proof that every accepted entity is a
 work. Explicit English descriptions of venues or staged performances and a combined
 director/translator/based-on staging pattern also exclude records. These checks
 do not infer identity from titles or guarantee accurate classification when source
-evidence is incomplete. Classification version 7 and search cache version 15
+evidence is incomplete. Classification version 8 and search cache version 16
 refresh older results.
 
 Genre ancestry is not always work-medium evidence: jukebox musical, for example,
@@ -62,8 +69,8 @@ independent direct stage-work P31 evidence, or literary-work P31 plus a direct
 recognized stage form in P7937. For P7937 form ancestry, the same exception also
 requires that the ancestry resolves to a recognized stage form. Genre evidence
 alone never supplies that independent identity. Explicit excluded type statements,
-P31 medium conflicts, production/performance conflicts and staging fingerprints
-still reject the record. This preserves genuine stage works without admitting
+P31 medium conflicts, production/performance conflicts and the remaining staging
+guards still reject the record. This preserves genuine stage works without admitting
 their film or television adaptations or merging distinct authored versions.
 
 Class parents and source revisions are cached for one hour. Search and details use
