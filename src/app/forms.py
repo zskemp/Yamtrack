@@ -18,8 +18,8 @@ from app.models import (
     Movie,
     Season,
     Sources,
-    Theater,
-    TheaterForms,
+    Stage,
+    StageForms,
 )
 
 
@@ -96,8 +96,8 @@ class CustomDurationField(forms.CharField):
 class ManualItemForm(forms.ModelForm):
     """Form for adding items to the database."""
 
-    theater_forms = forms.MultipleChoiceField(
-        choices=TheaterForms.choices,
+    stage_forms = forms.MultipleChoiceField(
+        choices=StageForms.choices,
         required=False,
         widget=forms.CheckboxSelectMultiple,
     )
@@ -126,7 +126,7 @@ class ManualItemForm(forms.ModelForm):
             "image",
             "season_number",
             "episode_number",
-            "theater_forms",
+            "stage_forms",
         ]
 
     def __init__(self, *args, **kwargs):
@@ -153,11 +153,11 @@ class ManualItemForm(forms.ModelForm):
         image = cleaned_data.get("image")
         media_type = cleaned_data.get("media_type")
 
-        if media_type == MediaTypes.THEATER.value:
-            if not cleaned_data.get("theater_forms"):
-                self.add_error("theater_forms", "Select at least one theater form.")
+        if media_type == MediaTypes.STAGE.value:
+            if not cleaned_data.get("stage_forms"):
+                self.add_error("stage_forms", "Select at least one stage form.")
         else:
-            cleaned_data["theater_forms"] = []
+            cleaned_data["stage_forms"] = []
 
         if not image:
             cleaned_data["image"] = settings.IMG_NONE
@@ -288,8 +288,8 @@ class MovieForm(MediaForm):
         ]
 
 
-class TheaterForm(MovieForm):
-    """Track a theater work through the standalone media form."""
+class StageForm(MovieForm):
+    """Track a stage work through the standalone media form."""
 
     end_date = forms.DateTimeField(
         required=False,
@@ -300,7 +300,7 @@ class TheaterForm(MovieForm):
     class Meta(MovieForm.Meta):
         """Bind personal tracking fields."""
 
-        model = Theater
+        model = Stage
         fields = [
             "score",
             "status",

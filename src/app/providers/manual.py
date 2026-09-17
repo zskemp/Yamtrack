@@ -33,13 +33,13 @@ def metadata(media_id, media_type):
         num_episodes = process_seasons(season_items, response)
         response["max_progress"] = num_episodes
         response["details"]["episodes"] = num_episodes
-    elif media_type in {MediaTypes.MOVIE.value, MediaTypes.THEATER.value}:
+    elif media_type in {MediaTypes.MOVIE.value, MediaTypes.STAGE.value}:
         response["max_progress"] = 1
 
-    if media_type == MediaTypes.THEATER.value:
-        response["theater_forms"] = item.theater_forms
+    if media_type == MediaTypes.STAGE.value:
+        response["stage_forms"] = item.stage_forms
         response["details"]["forms"] = ", ".join(
-            models.TheaterForms(value).label for value in item.theater_forms
+            models.StageForms(value).label for value in item.stage_forms
         )
 
     return response

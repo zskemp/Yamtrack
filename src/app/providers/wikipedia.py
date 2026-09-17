@@ -37,12 +37,12 @@ class UnavailableError(Exception):
 
 def cache_key(work_id):
     """Identify the cached article selection for a canonical work."""
-    return f"wikipedia_artwork_v{VERSION}_subject1_{work_id}"
+    return f"wikipedia_stage_artwork_v{VERSION}_subject1_{work_id}"
 
 
 def invalidate(source, media_type, work_id):
-    """Refresh article selection only for provider-backed Theater metadata sync."""
-    if source == "wikidata" and media_type == "theater":
+    """Refresh article selection only for provider-backed Stage metadata sync."""
+    if source == "wikidata" and media_type == "stage":
         cache.delete(cache_key(work_id))
 
 

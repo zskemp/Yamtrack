@@ -1,6 +1,12 @@
-# Theater Tracking
+# Stage Tracking
 
-Theater catalog entries describe works, independently of a particular production.
+Stage uses `stage` in routes, media-type values and CSV exports, with
+`stage_forms` and `stage_artwork` metadata fields. This unreleased feature's
+migrations were rewritten for a clean development break. Existing development
+installations from before the rename must recreate their database; previous
+feature URLs and CSV field names are not supported.
+
+Stage catalog entries describe works, independently of a particular production.
 Manual creation requires one or more forms: Play, Musical, Opera, Ballet or Other.
 Image URLs are optional. Forms belong to the shared work; ratings, notes, venue,
 city/location and production/company belong to each user's attendance.
@@ -9,15 +15,15 @@ Repeat attendance uses the existing Add new entry control. Date Seen maps to
 the existing end date and accepts a date without a performance time. Blank dates
 remain unknown. There is no runtime or incremental progress estimate.
 
-Own-data CSV exports encode theater forms as JSON and preserve separate attendance
-rows and their personal fields. Imports do not replace shared Theater metadata.
+Own-data CSV exports encode stage forms as JSON and preserve separate attendance
+rows and their personal fields. Imports do not replace shared Stage metadata.
 Invalid classifications are reported without overwriting existing attendance.
-Theater imports require a title; absent titles are rejected before overwrite
+Stage imports require a title; absent titles are rejected before overwrite
 bookkeeping, without attempting a provider lookup.
-Imports accept only manual or Wikidata Theater sources. Wikidata IDs must be
+Imports accept only manual or Wikidata Stage sources. Wikidata IDs must be
 syntactically valid QIDs within the catalog's 36-character limit; this offline
 check does not certify that an entity exists or establish alias equivalence.
-Season and episode columns must be blank for Theater works. Invalid identities
+Season and episode columns must be blank for Stage works. Invalid identities
 are reported and skipped before overwrite bookkeeping, so later valid rows can
 still restore without changing existing attendance for the rejected work.
 Artwork metadata is also JSON in CSV exports. Provider images are restored only
@@ -101,7 +107,7 @@ truncated searches. Search results are cached for 15 minutes; work metadata for
 one hour. Provider failures are shown through the existing error page. Rate-limit
 responses terminate the request rather than retry indefinitely. Saved attendance
 status and notes can be edited without an external metadata lookup.
-Theater works do not generate release-calendar events.
+Stage works do not generate release-calendar events.
 
 When the English/fallback response has no label, eligible works and their related
 creators/languages share one optional label-only request of at most 50 IDs. Work
@@ -113,7 +119,7 @@ visible; a later request can use cached labels to reach further missing labels.
 Failures and malformed/mismatched entity records do not block tracking, and
 incomplete label enrichment prevents caching the final search/detail response.
 Classification fetches request only claims and revision information; creator and
-language fetches request labels and aliases. Full work records retain the claims,
+language fetches request only labels. Full work records retain the claims,
 descriptions and sitelinks needed for discovery and artwork.
 Only labels are read from this fallback; it cannot change claims or establish
 redirects. Label metadata version 1 retains compatibility with source-language
@@ -123,7 +129,7 @@ labels recovered by earlier searches.
 
 ### Wikipedia Article Thumbnails
 
-Theater now prefers the representative image selected by the exact work's
+Stage now prefers the representative image selected by the exact work's
 Wikipedia article, including non-free posters under the operator-selected policy.
 Wikidata sitelinks identify articles; the returned article must independently
 report the same QID and not be a disambiguation page. An article association is
@@ -263,9 +269,11 @@ description. Explicit performance context and named-role portraits remain usable
 These are bounded metadata checks, not exhaustive image understanding or new
 remote lookups. A rejected image leaves the work discoverable.
 
-Images use returned thumbnails without cropping. Image credit controls accompany
-search, details, library, home, history and list covers, preserving title, artist,
-source, license and supplied attribution/permission notices. Credits are escaped
+Images use returned thumbnails without cropping. Work grids link through their
+images and titles to details pages, where image credits are expanded by default.
+Grid cards omit credit footers; table/list rows, history and custom-list covers
+retain credit controls. Title, artist, source, license and supplied
+attribution/permission notices remain stored and exported. Credits are escaped
 text, not provider HTML. Failures retain a stable frame and missing-image state.
 Compact notification-settings rows omit licensed thumbnails rather than display
 them without attribution. Offline restore requires a complete, consistent rights
@@ -302,7 +310,7 @@ database backup when the locally observed redirect evidence itself must move.
 
 ## Release Limitations
 
-This is not the completed image-rich Theater feature. Representative live grids
+This is not the completed image-rich Stage feature. Representative live grids
 still contain many missing images; the mostly-illustrated acceptance target is
 not met. Manual image URLs remain supported. Broader matching, warning coverage
 and visual review remain necessary before release.

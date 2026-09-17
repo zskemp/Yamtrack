@@ -1,4 +1,4 @@
-"""Keyless theater work discovery using Wikidata's public Action API."""
+"""Keyless stage work discovery using Wikidata's public Action API."""
 
 import re
 
@@ -7,8 +7,8 @@ from django.conf import settings
 from django.core.cache import cache
 
 from app import helpers
-from app import theater as theater_identity
-from app.models import MediaTypes, Sources, TheaterForms
+from app import stage as stage_identity
+from app.models import MediaTypes, Sources, StageForms
 from app.providers import commons, services, wikipedia
 
 BASE_URL = "https://www.wikidata.org/w/api.php"
@@ -321,7 +321,7 @@ def artwork_candidates(entity):
 def transform(entity, related):
     """Return Yamtrack metadata for a classified work."""
     work_forms = forms(entity)
-    details = {"forms": ", ".join(TheaterForms(value).label for value in work_forms)}
+    details = {"forms": ", ".join(StageForms(value).label for value in work_forms)}
     creators = []
     for property_id, role in CREATOR_ROLES.items():
         names = [
@@ -339,39 +339,15 @@ def transform(entity, related):
     ]
     if languages:
         details["original_language"] = ", ".join(languages)
-    creator_names = list(dict.fromkeys(creators))
-    for property_id in CREATOR_ROLES:
-        for identifier in identifiers(entity, property_id):
-            creator_names.extend(
-                alias["value"]
-                for alias in related.get(identifier, {})
-                .get("aliases", {})
-                .get("en", [])
-                if isinstance(alias.get("value"), str)
-            )
     return {
         "media_id": entity["id"],
         "source": Sources.WIKIDATA.value,
         "source_url": f"https://www.wikidata.org/wiki/{entity['id']}",
-        "media_type": MediaTypes.THEATER.value,
+        "media_type": MediaTypes.STAGE.value,
         "title": label(entity),
         "image": settings.IMG_NONE,
-        "theater_artwork": {},
+        "stage_artwork": {},
         "artwork_candidates": artwork_candidates(entity),
-        "artwork_category_context": {
-            "categories": [
-                value for value in values(entity, "P373") if isinstance(value, str)
-            ][:1],
-            "titles": [
-                label(entity),
-                *[
-                    alias["value"]
-                    for alias in entity.get("aliases", {}).get("en", [])
-                    if isinstance(alias.get("value"), str)
-                ],
-            ],
-            "creators": list(dict.fromkeys(creator_names)),
-        },
         "work_revision": entity.get("lastrevid"),
         "classification_version": CLASSIFICATION_VERSION,
         "label_version": LABEL_VERSION,
@@ -382,7 +358,7 @@ def transform(entity, related):
                 entity.get("sitelinks", {}).get(language + "wiki", {}).get("title"), str
             )
         },
-        "theater_forms": work_forms,
+        "stage_forms": work_forms,
         "work_description": " / ".join([details["forms"], *dict.fromkeys(creators)]),
         "synopsis": entity.get("descriptions", {})
         .get("en", {})
@@ -452,7 +428,7 @@ def hydrate(work_entities):
         for property_id in [*CREATOR_ROLES, "P364"]
         for identifier in identifiers(entity, property_id)
     ]
-    related = entities(references, props="labels|aliases")
+    related = entities(references, props="labels")
     incomplete = hydrate_labels([*work_entities, *related.values()])
     return [
         {**transform(entity, related), "labels_incomplete": incomplete}
@@ -468,29 +444,30 @@ def illustrate(work, *, article_artwork=None):
         work.pop("artwork_work_id", work["media_id"]),
         work.pop("artwork_candidates", []),
         work.get("work_revision"),
-        work["theater_forms"],
+        work["stage_forms"],
     )
-    work["artwork_unavailable"] = artwork is None
-    work["artwork_partial"] = bool(artwork) and not artwork.get(
-        "selection_complete", True
+    article_incomplete = wikipedia.incomplete(article_artwork)
+    work["artwork_unavailable"] = artwork is None or article_incomplete
+    work["artwork_partial"] = article_incomplete or (
+        bool(artwork) and not artwork.get("selection_complete", True)
     )
     work["wikipedia_version"] = wikipedia.VERSION
     if artwork and artwork["work_id"] != work["media_id"]:
-        artwork = theater_identity.retarget_artwork(artwork, work["media_id"])
+        artwork = stage_identity.retarget_artwork(artwork, work["media_id"])
     work.update(
         image=(artwork or {}).get("image", settings.IMG_NONE),
-        theater_artwork=artwork or {},
+        stage_artwork=artwork or {},
     )
     work["artwork_policy"] = commons.POLICY_VERSION
     return work
 
 
-def theater(media_id):
+def stage(media_id):
     """Resolve a work identity and reject unsupported or ambiguous records."""
     if not re.fullmatch(r"Q[1-9][0-9]*", media_id):
-        services.raise_not_found_error(Sources.WIKIDATA.value, media_id, "theater")
-    media_id = theater_identity.canonical_id(media_id)
-    key = f"wikidata_theater_{media_id}"
+        services.raise_not_found_error(Sources.WIKIDATA.value, media_id, "stage")
+    media_id = stage_identity.canonical_id(media_id)
+    key = f"wikidata_stage_{media_id}"
     cached = cache.get(key)
     if (
         cached is not None
@@ -504,27 +481,21 @@ def theater(media_id):
     classify_entities({media_id: entity}, {})
     if not forms(entity):
         services.raise_not_found_error(
-            Sources.WIKIDATA.value, media_id, "theater work with a supported form"
+            Sources.WIKIDATA.value, media_id, "stage work with a supported form"
         )
-    theater_identity.record_redirect(media_id, entity)
-    terminal_id = theater_identity.canonical_id(entity["id"])
+    stage_identity.record_redirect(media_id, entity)
+    terminal_id = stage_identity.canonical_id(entity["id"])
     if terminal_id != entity["id"]:
-        return theater(terminal_id)
+        return stage(terminal_id)
     work = hydrate([entity])[0]
     article_artwork = wikipedia.artworks([work])[work["media_id"]]
     with commons.request_budget():
         result = illustrate(work, article_artwork=article_artwork)
-    result["artwork_partial"] = result["artwork_partial"] or wikipedia.incomplete(
-        article_artwork
-    )
-    result["artwork_unavailable"] = result[
-        "artwork_unavailable"
-    ] or wikipedia.incomplete(article_artwork)
     if not any(
         result.get(key)
         for key in ("artwork_unavailable", "artwork_partial", "labels_incomplete")
     ):
-        cache.set(f"wikidata_theater_{result['media_id']}", result, 3600)
+        cache.set(f"wikidata_stage_{result['media_id']}", result, 3600)
     return result
 
 
@@ -542,7 +513,7 @@ def select_search_batch(params, selected, type_graph, *, optional=False):
     for hit in hits:
         entity = work_entities.get(hit["title"], {})
         if forms(entity):
-            theater_identity.record_redirect(hit["title"], entity)
+            stage_identity.record_redirect(hit["title"], entity)
             selected.setdefault(entity["id"], entity)
     return data.get("continue", {})
 
@@ -550,7 +521,7 @@ def select_search_batch(params, selected, type_graph, *, optional=False):
 def search(query, page):
     """Filter a bounded candidate window before canonical result pagination."""
     literal = " ".join(query.split())[:200]
-    key = f"wikidata_search_v16_{literal}"
+    key = f"wikidata_stage_search_v16_{literal}"
     cached = cache.get(key)
     if cached is None:
         escaped = literal.replace("\\", "\\\\").replace('"', '\\"')
@@ -610,7 +581,7 @@ def search(query, page):
     page = max(1, page)
     canonical_results = {}
     for work in cached["results"]:
-        canonical_id = theater_identity.canonical_id(work["media_id"])
+        canonical_id = stage_identity.canonical_id(work["media_id"])
         if canonical_id != work["media_id"]:
             canonical_results.setdefault(
                 canonical_id,
@@ -641,18 +612,10 @@ def illustrate_page(displayed, article_artworks):
     with commons.batch_files(
         [work for work in displayed if not article_artworks[work["media_id"]]]
     ):
-        illustrated = [
+        return [
             illustrate(
                 work,
                 article_artwork=article_artworks[work["media_id"]],
             )
             for work in displayed
         ]
-    for work in illustrated:
-        work["artwork_partial"] = work["artwork_partial"] or wikipedia.incomplete(
-            article_artworks[work["media_id"]]
-        )
-        work["artwork_unavailable"] = work[
-            "artwork_unavailable"
-        ] or wikipedia.incomplete(article_artworks[work["media_id"]])
-    return illustrated

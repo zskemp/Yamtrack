@@ -18,7 +18,7 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.CreateModel(
-            name='HistoricalTheater',
+            name='HistoricalStage',
             fields=[
                 ('id', models.BigIntegerField(auto_created=True, blank=True, db_index=True, verbose_name='ID')),
                 ('score', models.DecimalField(blank=True, decimal_places=1, max_digits=3, null=True, validators=[django.core.validators.DecimalValidator(3, 1), django.core.validators.MinValueValidator(0), django.core.validators.MaxValueValidator(10)])),
@@ -33,15 +33,15 @@ class Migration(migrations.Migration):
                 ('history_type', models.CharField(choices=[('+', 'Created'), ('~', 'Changed'), ('-', 'Deleted')], max_length=1)),
             ],
             options={
-                'verbose_name': 'historical theater',
-                'verbose_name_plural': 'historical theaters',
+                'verbose_name': 'historical stage',
+                'verbose_name_plural': 'historical stage',
                 'ordering': ('-history_date', '-history_id'),
                 'get_latest_by': ('history_date', 'history_id'),
             },
             bases=(simple_history.models.HistoricalChanges, models.Model),
         ),
         migrations.CreateModel(
-            name='Theater',
+            name='Stage',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
@@ -54,6 +54,7 @@ class Migration(migrations.Migration):
                 ('notes', models.TextField(blank=True, default='')),
             ],
             options={
+                'verbose_name_plural': 'stage',
                 'ordering': ['user', 'item', '-created_at'],
                 'abstract': False,
             },
@@ -64,30 +65,30 @@ class Migration(migrations.Migration):
         ),
         migrations.AddField(
             model_name='item',
-            name='theater_forms',
+            name='stage_forms',
             field=models.JSONField(blank=True, default=list),
         ),
         migrations.AlterField(
             model_name='item',
             name='media_type',
-            field=models.CharField(choices=[('tv', 'TV Show'), ('season', 'TV Season'), ('episode', 'Episode'), ('movie', 'Movie'), ('anime', 'Anime'), ('manga', 'Manga'), ('game', 'Game'), ('book', 'Book'), ('comic', 'Comic'), ('boardgame', 'Boardgame'), ('theater', 'Theater')], default='movie', max_length=10),
+            field=models.CharField(choices=[('tv', 'TV Show'), ('season', 'TV Season'), ('episode', 'Episode'), ('movie', 'Movie'), ('anime', 'Anime'), ('manga', 'Manga'), ('game', 'Game'), ('book', 'Book'), ('comic', 'Comic'), ('boardgame', 'Boardgame'), ('stage', 'Stage')], default='movie', max_length=10),
         ),
         migrations.AddConstraint(
             model_name='item',
-            constraint=models.CheckConstraint(condition=models.Q(('media_type__in', ['tv', 'season', 'episode', 'movie', 'anime', 'manga', 'game', 'book', 'comic', 'boardgame', 'theater'])), name='app_item_media_type_valid'),
+            constraint=models.CheckConstraint(condition=models.Q(('media_type__in', ['tv', 'season', 'episode', 'movie', 'anime', 'manga', 'game', 'book', 'comic', 'boardgame', 'stage'])), name='app_item_media_type_valid'),
         ),
         migrations.AddField(
-            model_name='historicaltheater',
+            model_name='historicalstage',
             name='history_user',
             field=models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='+', to=settings.AUTH_USER_MODEL),
         ),
         migrations.AddField(
-            model_name='theater',
+            model_name='stage',
             name='item',
             field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='app.item'),
         ),
         migrations.AddField(
-            model_name='theater',
+            model_name='stage',
             name='user',
             field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to=settings.AUTH_USER_MODEL),
         ),

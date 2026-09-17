@@ -1,4 +1,4 @@
-"""Persist provider-verified Theater identity without coalescing attendance."""
+"""Persist provider-verified Stage identity without coalescing attendance."""
 
 import re
 
@@ -7,7 +7,7 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError, connection, transaction
 from django.db.models import F
 
-from app.models import Item, MediaTypes, Sources, Theater, TheaterRedirect
+from app.models import Item, MediaTypes, Sources, Stage, StageRedirect
 from app.providers import services
 from lists.models import CustomListItem
 
@@ -17,7 +17,7 @@ def identity_conflict():
     raise services.ProviderAPIError(
         Sources.WIKIDATA.value,
         ValueError(),
-        "Conflicting Theater identity; saved records were not changed",
+        "Conflicting Stage identity; saved records were not changed",
     )
 
 
@@ -27,7 +27,7 @@ def serialize_redirects():
         with connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(%s)", [1497451860])
     elif connection.vendor == "sqlite":
-        TheaterRedirect.objects.filter(pk__isnull=True).update(revision=F("revision"))
+        StageRedirect.objects.filter(pk__isnull=True).update(revision=F("revision"))
     else:
         identity_conflict()
 
@@ -50,14 +50,14 @@ def record_redirect(alias_id, entity):
     ):
         identity_conflict()
     existing = (
-        TheaterRedirect.objects.select_for_update().filter(alias_id=alias_id).first()
+        StageRedirect.objects.select_for_update().filter(alias_id=alias_id).first()
     )
-    terminal_id = TheaterRedirect.resolve(canonical_id)
+    terminal_id = StageRedirect.resolve(canonical_id)
     if terminal_id == alias_id:
         identity_conflict()
-    if existing and TheaterRedirect.resolve(existing.canonical_id) != terminal_id:
+    if existing and StageRedirect.resolve(existing.canonical_id) != terminal_id:
         identity_conflict()
-    TheaterRedirect.objects.get_or_create(
+    StageRedirect.objects.get_or_create(
         alias_id=alias_id,
         defaults={"canonical_id": canonical_id, "revision": revision},
     )
@@ -66,7 +66,7 @@ def record_redirect(alias_id, entity):
         Item.objects.select_for_update()
         .filter(
             source=Sources.WIKIDATA.value,
-            media_type=MediaTypes.THEATER.value,
+            media_type=MediaTypes.STAGE.value,
             media_id__in=[alias_id, canonical_id],
         )
         .order_by("pk")
@@ -86,18 +86,18 @@ def record_redirect(alias_id, entity):
 def rename_saved_work(old, canonical_id):
     """Retry as a merge if a concurrent catalog write created the target first."""
     old.media_id = canonical_id
-    if old.theater_artwork:
-        old.theater_artwork = retarget_artwork(old.theater_artwork, canonical_id)
+    if old.stage_artwork:
+        old.stage_artwork = retarget_artwork(old.stage_artwork, canonical_id)
     try:
         with transaction.atomic():
-            old.save(update_fields=["media_id", "theater_artwork"])
+            old.save(update_fields=["media_id", "stage_artwork"])
     except IntegrityError:
         target = (
             Item.objects.select_for_update()
             .filter(
                 media_id=canonical_id,
                 source=Sources.WIKIDATA.value,
-                media_type=MediaTypes.THEATER.value,
+                media_type=MediaTypes.STAGE.value,
             )
             .first()
         )
@@ -110,21 +110,21 @@ def rename_saved_work(old, canonical_id):
 def merge_saved_work(old, target):
     """Move only known personal references; reject unexpected cascade losses."""
     exclusions = get_user_model().notification_excluded_items.through
-    supported = {Theater, CustomListItem, exclusions}
+    supported = {Stage, CustomListItem, exclusions}
     for relation in old._meta.related_objects:
         if relation.many_to_many or relation.related_model in supported:
             continue
         if relation.related_model.objects.filter(**{relation.field.name: old}).exists():
             identity_conflict()
     if (
-        old.theater_artwork
-        and not target.theater_artwork
+        old.stage_artwork
+        and not target.stage_artwork
         and target.image in {"", settings.IMG_NONE}
     ):
         target.image = old.image
-        target.theater_artwork = retarget_artwork(old.theater_artwork, target.media_id)
-        target.save(update_fields=["image", "theater_artwork"])
-    Theater.objects.filter(item=old).update(item=target)
+        target.stage_artwork = retarget_artwork(old.stage_artwork, target.media_id)
+        target.save(update_fields=["image", "stage_artwork"])
+    Stage.objects.filter(item=old).update(item=target)
     for membership in CustomListItem.objects.filter(item=old):
         existing = CustomListItem.objects.filter(
             item=target, custom_list=membership.custom_list
@@ -155,4 +155,4 @@ def retarget_artwork(artwork, media_id):
 
 def canonical_id(media_id):
     """Use persisted provider evidence without consulting a remote service."""
-    return TheaterRedirect.resolve(media_id)
+    return StageRedirect.resolve(media_id)

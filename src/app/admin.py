@@ -7,7 +7,7 @@ from django.contrib.admin.sites import AlreadyRegistered
 from app.models import (
     Episode,
     Item,
-    TheaterRedirect,
+    StageRedirect,
     UserMessage,
 )
 
@@ -46,8 +46,8 @@ class UserMessageAdmin(admin.ModelAdmin):
     list_filter = ["level", "shown_at"]
 
 
-@admin.register(TheaterRedirect)
-class TheaterRedirectAdmin(admin.ModelAdmin):
+@admin.register(StageRedirect)
+class StageRedirectAdmin(admin.ModelAdmin):
     """Inspect provider evidence without manually asserting new equivalences."""
 
     list_display = ["alias_id", "canonical_id", "revision", "observed_at"]

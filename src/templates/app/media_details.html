@@ -15,10 +15,10 @@
       {# Poster #}
       <div class="w-full md:w-1/4 max-w-62.5 mx-auto md:mx-0">
         <img alt="{{ media.title }}"
-               class="w-full rounded-lg shadow-lg bg-[#2a2f35] {% if media.theater_artwork %}aspect-2/3 object-contain{% else %}object-cover{% endif %}"
-               {% if media.theater_artwork %}onerror="this.onerror=null; this.src='{{ IMG_NONE|escapejs }}'"{% endif %}
+               class="w-full rounded-lg shadow-lg bg-[#2a2f35] {% if media.stage_artwork %}aspect-2/3 object-contain{% else %}object-cover{% endif %}"
+               {% if media.stage_artwork %}onerror="this.onerror=null; this.src='{{ IMG_NONE|escapejs }}'"{% endif %}
              src="{{ media.image }}">
-             {% include "app/components/artwork_credit.html" with artwork=media.theater_artwork only %}
+             {% include "app/components/artwork_credit.html" with artwork=media.stage_artwork expanded=True only %}
 
         <div class="mt-4 relative flex items-stretch"
              x-data="{ trackOpen: false, createOpen: false, menuOpen: false }"
@@ -261,12 +261,12 @@
 
               {% if current_instance.end_date %}
                 <div class="flex @max-[210px]:flex-col justify-between text-sm">
-                  <span class="text-gray-400">{% if media_type == MediaTypes.THEATER.value %}Date seen:{% else %}Ended:{% endif %}</span>
-                  <span class="text-gray-200">{% if media_type == MediaTypes.THEATER.value %}{{ current_instance.end_date|date:user.date_format }}{% else %}{{ current_instance.end_date|datetime_format:user }}{% endif %}</span>
+                  <span class="text-gray-400">{% if media_type == MediaTypes.STAGE.value %}Date seen:{% else %}Ended:{% endif %}</span>
+                  <span class="text-gray-200">{% if media_type == MediaTypes.STAGE.value %}{{ current_instance.end_date|date:user.date_format }}{% else %}{{ current_instance.end_date|datetime_format:user }}{% endif %}</span>
                 </div>
               {% endif %}
 
-              {% if media_type != MediaTypes.MOVIE.value and media_type != MediaTypes.THEATER.value %}
+              {% if media_type != MediaTypes.MOVIE.value and media_type != MediaTypes.STAGE.value %}
                 <div class="flex @max-[210px]:flex-col justify-between text-sm">
                   <span class="text-gray-400">Progress:</span>
                   <span class="text-gray-200">
@@ -277,7 +277,7 @@
               {% endif %}
             </div>
 
-            {% if media_type == MediaTypes.THEATER.value %}
+            {% if media_type == MediaTypes.STAGE.value %}
               {% include "app/components/attendance_details.html" with attendance=current_instance %}
             {% endif %}
 
@@ -514,7 +514,7 @@
                     </div>
                   </div>
 
-                  {% if media.media_type != MediaTypes.MOVIE.value and media_type != MediaTypes.THEATER.value %}
+                  {% if media.media_type != MediaTypes.MOVIE.value and media_type != MediaTypes.STAGE.value %}
                     <p class="text-xs text-gray-400 mt-1">
                       {{ user_media.formatted_progress }}
                       {% if media.media_type != MediaTypes.GAME.value %}
@@ -535,7 +535,7 @@
                     </p>
                   {% endif %}
 
-                  {% if media_type == MediaTypes.THEATER.value %}
+                  {% if media_type == MediaTypes.STAGE.value %}
                     {% include "app/components/attendance_details.html" with attendance=user_media %}
                   {% endif %}
                   {% if user_media.notes %}

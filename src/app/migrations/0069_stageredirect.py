@@ -6,12 +6,12 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('app', '0068_item_theater_artwork'),
+        ('app', '0068_item_stage_artwork'),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='TheaterRedirect',
+            name='StageRedirect',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
                 ('alias_id', models.CharField(max_length=36, unique=True)),

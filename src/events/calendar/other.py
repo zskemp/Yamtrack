@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 def process_other(item, events_bulk):
     """Process other types of items and add events to the event list."""
-    if item.media_type == MediaTypes.THEATER.value:
+    if item.media_type == MediaTypes.STAGE.value:
         return
     logger.info("Fetching releases for %s", item)
     try:

@@ -727,11 +727,11 @@ def batch_files(works):
     pending = []
     for work in works:
         identifier = work.get("artwork_work_id", work["media_id"])
-        cached = cache.get(f"commons_v{POLICY_VERSION}_{identifier}")
+        cached = cache.get(f"commons_stage_v{POLICY_VERSION}_{identifier}")
         if (
             cached is not None
             and cached.get("work_revision") == work.get("work_revision")
-            and cached.get("work_forms") == list(work["theater_forms"])
+            and cached.get("work_forms") == list(work["stage_forms"])
         ):
             continue
         filenames = list(
@@ -836,7 +836,7 @@ def unrelated_portrait(page):
     )
 
 
-def suitable_for_work(page, work_forms, *, enrichment=False):
+def suitable_for_work(page, work_forms):
     """Reject explicit adaptation/form conflicts independently of image rights."""
     info = next(iter(page.get("imageinfo", [])), {})
     description = text(
@@ -854,25 +854,18 @@ def suitable_for_work(page, work_forms, *, enrichment=False):
         description,
     ):
         return False
-    if any(
+    return not any(
         re.search(rf"\b{form}\b", description) and form not in work_forms
         for form in ("opera", "ballet", "musical")
-    ):
-        return False
-    return not enrichment or bool(
-        re.search(
-            r"\b(performance|production|opera|ballet|poster|illustration)\b",
-            description,
-        )
     )
 
 
-def verified_candidates(filenames, work_forms, *, enrichment=False):
+def verified_candidates(filenames, work_forms):
     """Keep complete verified candidates if a later optional batch is unavailable."""
     candidates = []
     try:
         for page in image_pages(filenames):
-            if not suitable_for_work(page, work_forms, enrichment=enrichment):
+            if not suitable_for_work(page, work_forms):
                 continue
             candidate = qualified_image(page)
             if candidate:
@@ -1008,7 +1001,7 @@ def select_artwork(
     filenames = list(
         dict.fromkeys(filename for filename in filenames if isinstance(filename, str))
     )[:5]
-    key = f"commons_v{POLICY_VERSION}_{work_id}"
+    key = f"commons_stage_v{POLICY_VERSION}_{work_id}"
     cached = cache.get(key)
     if (
         cached is not None

@@ -24,12 +24,12 @@ from app.models import (
     Movie,
     Season,
     Sources,
+    Stage,
     Status,
-    Theater,
 )
 
 
-class TheaterExportRestoreTest(TestCase):
+class StageExportRestoreTest(TestCase):
     """Own-data endpoints retain work forms and independent attendances."""
 
     def setUp(self):
@@ -44,11 +44,11 @@ class TheaterExportRestoreTest(TestCase):
         work = Item.objects.create(
             media_id="Q822850",
             source="wikidata",
-            media_type="theater",
+            media_type="stage",
             title="The House of Bernarda Alba",
-            theater_forms=["play"],
+            stage_forms=["play"],
         )
-        Theater.objects.create(item=work, user=owner, status="Completed", notes="Keep")
+        Stage.objects.create(item=work, user=owner, status="Completed", notes="Keep")
         self.client.force_login(owner)
         content = b"".join(self.client.get(reverse("export_csv")).streaming_content)
         original = next(csv.DictReader(StringIO(content.decode())))
@@ -88,31 +88,31 @@ class TheaterExportRestoreTest(TestCase):
                         },
                     )
                 self.assertEqual(response.status_code, 302)
-                self.assertEqual(Item.objects.filter(media_type="theater").count(), 1)
-                restored = Theater.objects.get(user=recipient)
+                self.assertEqual(Item.objects.filter(media_type="stage").count(), 1)
+                restored = Stage.objects.get(user=recipient)
                 self.assertEqual(restored.item, work)
                 self.assertEqual(restored.notes, expected_notes)
-                self.assertEqual(Theater.objects.get(user=owner).notes, "Keep")
+                self.assertEqual(Stage.objects.get(user=owner).notes, "Keep")
                 result = "\n".join(task_logs.output)
-                self.assertIn("Imported 1 Theater.", result)
+                self.assertIn("Imported 1 Stage.", result)
                 self.assertIn(
-                    "Theater import requires a valid Wikidata work ID."
+                    "Stage import requires a valid Wikidata work ID."
                     if source == "wikidata"
-                    else "Theater import requires a manual or Wikidata source.",
+                    else "Stage import requires a manual or Wikidata source.",
                     result,
                 )
 
-    def test_theater_restore_rejects_season_and_episode_identity(self):
+    def test_stage_restore_rejects_season_and_episode_identity(self):
         """Non-applicable series fields cannot split a work or erase attendance."""
         owner = get_user_model().objects.create_user(username="standalone-owner")
         work = Item.objects.create(
             media_id="Q822850",
             source="wikidata",
-            media_type="theater",
+            media_type="stage",
             title="The House of Bernarda Alba",
-            theater_forms=["play"],
+            stage_forms=["play"],
         )
-        attendance = Theater.objects.create(
+        attendance = Stage.objects.create(
             item=work, user=owner, status="Completed", notes="Original visit"
         )
         self.client.force_login(owner)
@@ -149,17 +149,15 @@ class TheaterExportRestoreTest(TestCase):
                     attendance.refresh_from_db()
                     self.assertEqual(attendance.notes, "Original visit")
                     self.assertEqual(
-                        Theater.objects.get(user=owner, item__media_id="Q822851").notes,
+                        Stage.objects.get(user=owner, item__media_id="Q822851").notes,
                         expected_notes,
                     )
-                    self.assertEqual(
-                        Item.objects.filter(media_type="theater").count(), 2
-                    )
-                    self.assertEqual(Theater.objects.filter(user=owner).count(), 2)
+                    self.assertEqual(Item.objects.filter(media_type="stage").count(), 2)
+                    self.assertEqual(Stage.objects.filter(user=owner).count(), 2)
                     result = "\n".join(task_logs.output)
-                    self.assertIn("Imported 1 Theater.", result)
+                    self.assertIn("Imported 1 Stage.", result)
                     self.assertIn(
-                        "Theater import cannot include season or episode numbers.",
+                        "Stage import cannot include season or episode numbers.",
                         result,
                     )
 
@@ -167,7 +165,7 @@ class TheaterExportRestoreTest(TestCase):
         """Older credits retain images and gain any required reproduction caveat."""
         fixture = json.loads(
             (
-                Path(__file__).parents[2] / "app/tests/mock_data/theater_artwork.json"
+                Path(__file__).parents[2] / "app/tests/mock_data/stage_artwork.json"
             ).read_text()
         )
         fixture["commons"]["query"]["pages"]["123"]["templates"].append(
@@ -191,14 +189,14 @@ class TheaterExportRestoreTest(TestCase):
                 reverse("media_save"),
                 {
                     "media_id": "Q822850",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "source": "wikidata",
                     "status": "Completed",
                 },
             )
         content = b"".join(self.client.get(reverse("export_csv")).streaming_content)
         rows = list(csv.DictReader(StringIO(content.decode())))
-        artwork = json.loads(rows[0]["theater_artwork"])
+        artwork = json.loads(rows[0]["stage_artwork"])
         for policy, notices, supports_cc in (
             (6, "", True),
             (8, artwork["notices"], True),
@@ -228,7 +226,7 @@ class TheaterExportRestoreTest(TestCase):
                         "Credit": "Theatre Magazine, January 1919",
                     },
                 }
-                rows[0]["theater_artwork"] = json.dumps(legacy_artwork)
+                rows[0]["stage_artwork"] = json.dumps(legacy_artwork)
                 legacy = StringIO()
                 writer = csv.DictWriter(legacy, fieldnames=rows[0].keys())
                 writer.writeheader()
@@ -249,24 +247,22 @@ class TheaterExportRestoreTest(TestCase):
                     )
                 restored = Item.objects.get(media_id="Q822850")
                 if not supports_cc:
-                    self.assertEqual(restored.theater_artwork, {})
+                    self.assertEqual(restored.stage_artwork, {})
                     self.assertNotEqual(restored.image, artwork["image"])
                     continue
                 self.assertEqual(restored.image, artwork["image"])
-                self.assertIn("PD-Art", restored.theater_artwork["notices"])
+                self.assertIn("PD-Art", restored.stage_artwork["notices"])
+                self.assertEqual(restored.stage_artwork["artist"], "Test Photographer")
+                self.assertEqual(restored.stage_artwork["license"], "CC BY-SA 4.0")
                 self.assertEqual(
-                    restored.theater_artwork["artist"], "Test Photographer"
-                )
-                self.assertEqual(restored.theater_artwork["license"], "CC BY-SA 4.0")
-                self.assertEqual(
-                    restored.theater_artwork["credit"], "Theatre Magazine, January 1919"
+                    restored.stage_artwork["credit"], "Theatre Magazine, January 1919"
                 )
 
     def test_provider_artwork_round_trip_offline(self):
         """A licensed provider image keeps its credit through offline restore."""
         fixture = json.loads(
             (
-                Path(__file__).parents[2] / "app/tests/mock_data/theater_artwork.json"
+                Path(__file__).parents[2] / "app/tests/mock_data/stage_artwork.json"
             ).read_text()
         )
         owner = get_user_model().objects.create_user(username="artwork-owner")
@@ -288,7 +284,7 @@ class TheaterExportRestoreTest(TestCase):
                 reverse("media_save"),
                 {
                     "media_id": "Q822850",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "source": "wikidata",
                     "status": "Completed",
                     "venue": "Local Theatre",
@@ -304,21 +300,21 @@ class TheaterExportRestoreTest(TestCase):
                 reverse("import_yamtrack"),
                 {
                     "mode": "new",
-                    "yamtrack_csv": SimpleUploadedFile("theater.csv", content),
+                    "yamtrack_csv": SimpleUploadedFile("stage.csv", content),
                 },
             )
         work = Item.objects.get(media_id="Q822850")
-        self.assertEqual(work.theater_artwork["artist"], "Test Photographer")
-        self.assertEqual(work.theater_artwork["work_id"], "Q822850")
+        self.assertEqual(work.stage_artwork["artist"], "Test Photographer")
+        self.assertEqual(work.stage_artwork["work_id"], "Q822850")
         response = self.client.get(
-            reverse("medialist", args=[owner.username, "theater"])
+            reverse("medialist", args=[owner.username, "stage"]), {"layout": "table"}
         )
         self.assertContains(response, "Test Photographer")
         self.assertContains(response, "CC BY-SA 4.0")
         rows = list(csv.DictReader(StringIO(content.decode())))
-        artwork = json.loads(rows[0]["theater_artwork"])
+        artwork = json.loads(rows[0]["stage_artwork"])
         artwork["source_url"] = "javascript:alert(1)"
-        rows[0]["theater_artwork"] = json.dumps(artwork)
+        rows[0]["stage_artwork"] = json.dumps(artwork)
         malicious = StringIO()
         writer = csv.DictWriter(malicious, fieldnames=rows[0].keys())
         writer.writeheader()
@@ -333,16 +329,14 @@ class TheaterExportRestoreTest(TestCase):
                 {
                     "mode": "new",
                     "yamtrack_csv": SimpleUploadedFile(
-                        "theater.csv", malicious.getvalue().encode()
+                        "stage.csv", malicious.getvalue().encode()
                     ),
                 },
             )
-        response = self.client.get(
-            reverse("medialist", args=[owner.username, "theater"])
-        )
+        response = self.client.get(reverse("medialist", args=[owner.username, "stage"]))
         self.assertNotContains(response, "javascript:")
         self.assertNotContains(response, artwork["image"])
-        self.assertEqual(Theater.objects.get().venue, "Local Theatre")
+        self.assertEqual(Stage.objects.get().venue, "Local Theatre")
         self._assert_invalid_legacy_credits_omit_images(content)
 
     def _assert_invalid_legacy_credits_omit_images(self, content):
@@ -350,7 +344,7 @@ class TheaterExportRestoreTest(TestCase):
         for legacy_change in ("missing_artist", "unverified_public_domain"):
             with self.subTest(legacy_change=legacy_change):
                 rows = list(csv.DictReader(StringIO(content.decode())))
-                artwork = json.loads(rows[0]["theater_artwork"])
+                artwork = json.loads(rows[0]["stage_artwork"])
                 artwork["policy"] = 3
                 if legacy_change == "missing_artist":
                     artwork["artist"] = ""
@@ -360,7 +354,7 @@ class TheaterExportRestoreTest(TestCase):
                     artwork["license_url"] = (
                         "https://commons.wikimedia.org/wiki/Template:pd-textlogo"
                     )
-                rows[0]["theater_artwork"] = json.dumps(artwork)
+                rows[0]["stage_artwork"] = json.dumps(artwork)
                 invalid = StringIO()
                 writer = csv.DictWriter(invalid, fieldnames=rows[0].keys())
                 writer.writeheader()
@@ -375,10 +369,8 @@ class TheaterExportRestoreTest(TestCase):
                         ),
                     },
                 )
-                self.assertEqual(
-                    Item.objects.get(media_id="Q822850").theater_artwork, {}
-                )
-                self.assertEqual(Theater.objects.get().venue, "Local Theatre")
+                self.assertEqual(Item.objects.get(media_id="Q822850").stage_artwork, {})
+                self.assertEqual(Stage.objects.get().venue, "Local Theatre")
 
     def test_manual_attendance_round_trip(self):
         """A fresh restore needs no external lookup or original catalog rows."""
@@ -388,8 +380,8 @@ class TheaterExportRestoreTest(TestCase):
             reverse("create_entry"),
             {
                 "title": "Local Hybrid",
-                "media_type": "theater",
-                "theater_forms": ["play", "musical"],
+                "media_type": "stage",
+                "stage_forms": ["play", "musical"],
                 "status": "Completed",
                 "venue": "First Theatre",
                 "end_date": "2026-09-01",
@@ -401,7 +393,7 @@ class TheaterExportRestoreTest(TestCase):
             reverse("media_save"),
             {
                 "media_id": item.media_id,
-                "media_type": "theater",
+                "media_type": "stage",
                 "source": "manual",
                 "status": "Planning",
                 "venue": "Second Theatre",
@@ -415,7 +407,8 @@ class TheaterExportRestoreTest(TestCase):
         content = b"".join(response.streaming_content)
         rows = list(csv.DictReader(StringIO(content.decode())))
         self.assertEqual(len(rows), 2)
-        self.assertEqual(json.loads(rows[0]["theater_forms"]), ["play", "musical"])
+        self.assertEqual({row["media_type"] for row in rows}, {"stage"})
+        self.assertEqual(json.loads(rows[0]["stage_forms"]), ["play", "musical"])
         item.delete()
         recipient = get_user_model().objects.create_user(username="recipient")
         self.client.force_login(recipient)
@@ -424,19 +417,19 @@ class TheaterExportRestoreTest(TestCase):
             {
                 "mode": "new",
                 "yamtrack_csv": SimpleUploadedFile(
-                    "theater.csv", content, content_type="text/csv"
+                    "stage.csv", content, content_type="text/csv"
                 ),
             },
         )
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(Theater.objects.filter(user=recipient).count(), 2)
-        self.assertEqual(Theater.objects.filter(user=owner).count(), 0)
+        self.assertEqual(Stage.objects.filter(user=recipient).count(), 2)
+        self.assertEqual(Stage.objects.filter(user=owner).count(), 0)
         restored = Item.objects.get(title="Local Hybrid")
-        self.assertEqual(restored.theater_forms, ["play", "musical"])
-        first = Theater.objects.get(user=recipient, venue="First Theatre")
+        self.assertEqual(restored.stage_forms, ["play", "musical"])
+        first = Stage.objects.get(user=recipient, venue="First Theatre")
         self.assertEqual(first.end_date.date().isoformat(), "2026-09-01")
         self.assertEqual(first.notes, "First visit\nSecond line")
-        second = Theater.objects.get(user=recipient, venue="Second Theatre")
+        second = Stage.objects.get(user=recipient, venue="Second Theatre")
         self.assertEqual(second.production, "Local Company")
         self.assertEqual(second.location, "Paris")
         self.assertEqual(second.score, 8)
@@ -444,7 +437,7 @@ class TheaterExportRestoreTest(TestCase):
         writer = csv.DictWriter(broken, fieldnames=rows[0].keys())
         writer.writeheader()
         for row in rows:
-            row["theater_forms"] = '["film"]'
+            row["stage_forms"] = '["film"]'
             writer.writerow(row)
         self.client.post(
             reverse("import_yamtrack"),
@@ -455,15 +448,15 @@ class TheaterExportRestoreTest(TestCase):
                 ),
             },
         )
-        self.assertEqual(Theater.objects.filter(user=recipient).count(), 2)
+        self.assertEqual(Stage.objects.filter(user=recipient).count(), 2)
         self.assertEqual(
-            Item.objects.get(pk=restored.pk).theater_forms, ["play", "musical"]
+            Item.objects.get(pk=restored.pk).stage_forms, ["play", "musical"]
         )
         broken = StringIO()
         writer = csv.DictWriter(broken, fieldnames=rows[0].keys())
         writer.writeheader()
         for row in rows:
-            row.update(title="", theater_forms='["play"]')
+            row.update(title="", stage_forms='["play"]')
             writer.writerow(row)
         self.client.post(
             reverse("import_yamtrack"),
@@ -474,7 +467,7 @@ class TheaterExportRestoreTest(TestCase):
                 ),
             },
         )
-        self.assertEqual(Theater.objects.filter(user=recipient).count(), 2)
+        self.assertEqual(Stage.objects.filter(user=recipient).count(), 2)
         self.assertEqual(Item.objects.get(pk=restored.pk).title, "Local Hybrid")
 
 

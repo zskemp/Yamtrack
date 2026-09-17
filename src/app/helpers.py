@@ -178,20 +178,20 @@ def _needs_image_refresh(item, new_image):
     return not item.image or item.image == settings.IMG_NONE
 
 
-def preserve_theater_artwork(metadata, item=None):
+def preserve_stage_artwork(metadata, item=None):
     """Retain saved artwork when a reduced lookup cannot replace it."""
-    if metadata.get("media_type") != MediaTypes.THEATER.value:
+    if metadata.get("media_type") != MediaTypes.STAGE.value:
         return
     if item is None:
         item = Item.objects.filter(
             media_id=metadata["media_id"],
             source=metadata["source"],
-            media_type=MediaTypes.THEATER.value,
+            media_type=MediaTypes.STAGE.value,
         ).first()
-    if item is None or item.media_type != MediaTypes.THEATER.value:
+    if item is None or item.media_type != MediaTypes.STAGE.value:
         return
-    saved = item.theater_artwork
-    fresh = metadata.get("theater_artwork", {})
+    saved = item.stage_artwork
+    fresh = metadata.get("stage_artwork", {})
     if saved and (
         metadata.get("artwork_unavailable")
         or (not fresh and metadata.get("artwork_direct_missing"))
@@ -201,16 +201,19 @@ def preserve_theater_artwork(metadata, item=None):
             and fresh.get("provider") != "wikipedia"
         )
     ):
-        metadata.update(image=item.image, theater_artwork=saved)
+        metadata.update(image=item.image, stage_artwork=saved)
 
 
-def refresh_item_image_if_missing(item, new_image, theater_artwork=None):
-    """Update an Item's stored image when it's missing and a real one is available."""
-    if theater_artwork is not None:
-        if item.image != new_image or item.theater_artwork != theater_artwork:
+def refresh_item_artwork(item, new_image, stage_artwork=None):
+    """Fill missing images, or synchronize supplied Stage artwork and its image.
+
+    None retains missing-image-only behavior; an empty dict clears Stage credits.
+    """
+    if stage_artwork is not None:
+        if item.image != new_image or item.stage_artwork != stage_artwork:
             item.image = new_image
-            item.theater_artwork = theater_artwork
-            item.save(update_fields=["image", "theater_artwork"])
+            item.stage_artwork = stage_artwork
+            item.save(update_fields=["image", "stage_artwork"])
         return
     if not _needs_image_refresh(item, new_image):
         return
@@ -238,7 +241,7 @@ def enrich_items_with_user_data(request, items, section_name):
 
         media_item = media_lookup.get(key)
         if media_item is not None:
-            preserve_theater_artwork(item, media_item.item)
+            preserve_stage_artwork(item, media_item.item)
         if _should_skip_completed_recommendation(
             request.user, section_name, media_item
         ):
@@ -250,16 +253,16 @@ def enrich_items_with_user_data(request, items, section_name):
             media_item.item.image = item["image"]
             items_to_refresh.append(media_item.item)
 
-        if media_item is not None and "theater_artwork" in item:
+        if media_item is not None and "stage_artwork" in item:
             media_item.item.image = item["image"]
-            media_item.item.theater_artwork = item["theater_artwork"]
+            media_item.item.stage_artwork = item["stage_artwork"]
             if media_item.item not in items_to_refresh:
                 items_to_refresh.append(media_item.item)
 
         enriched_items.append({"item": item, "media": media_item})
 
     if items_to_refresh:
-        Item.objects.bulk_update(items_to_refresh, ["image", "theater_artwork"])
+        Item.objects.bulk_update(items_to_refresh, ["image", "stage_artwork"])
 
     return enriched_items
 

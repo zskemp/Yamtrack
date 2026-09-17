@@ -92,10 +92,10 @@ class CustomList(models.Model):
         return self.items.first().image if self.items.first() else settings.IMG_NONE
 
     @property
-    def theater_artwork(self):
+    def stage_artwork(self):
         """Keep the list cover's image credit attached to its source item."""
         item = self.items.first()
-        return item.theater_artwork if item else {}
+        return item.stage_artwork if item else {}
 
 
 class CustomListItemManager(models.Manager):

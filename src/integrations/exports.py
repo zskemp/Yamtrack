@@ -70,7 +70,7 @@ def generate_rows(user):
             row = [getattr(media.item, field, "") for field in fields["item"]] + [
                 getattr(media, field, "") for field in fields["track"]
             ]
-            for json_field in ("theater_forms", "theater_artwork"):
+            for json_field in ("stage_forms", "stage_artwork"):
                 row[fields["item"].index(json_field)] = json.dumps(
                     getattr(media.item, json_field),
                 )

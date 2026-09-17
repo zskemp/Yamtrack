@@ -11,7 +11,7 @@ from django.core.exceptions import ValidationError
 from django.utils.dateparse import parse_datetime
 
 import app
-from app import config, theater
+from app import config, stage
 from app.models import MediaTypes, Sources
 from app.providers import commons, services, wikipedia
 from app.templatetags import app_tags
@@ -97,8 +97,8 @@ class YamtrackImporter:
         """Process a single row from the CSV file."""
         media_type = row["media_type"]
 
-        theater_defaults = self._theater_defaults(row)
-        if theater_defaults is None:
+        stage_defaults = self._stage_defaults(row)
+        if stage_defaults is None:
             return
 
         season_number = (
@@ -138,7 +138,7 @@ class YamtrackImporter:
 
         item_writer = (
             app.models.Item.objects.get_or_create
-            if media_type == MediaTypes.THEATER.value
+            if media_type == MediaTypes.STAGE.value
             else app.models.Item.objects.update_or_create
         )
         item, _ = item_writer(
@@ -150,7 +150,7 @@ class YamtrackImporter:
             defaults={
                 "title": row["title"],
                 "image": row["image"],
-                **theater_defaults,
+                **stage_defaults,
             },
         )
 
@@ -179,60 +179,60 @@ class YamtrackImporter:
             logger.error(error_msg)
 
     @staticmethod
-    def _theater_identity_error(row):
-        """Identify unsupported or malformed standalone Theater identities."""
+    def _stage_identity_error(row):
+        """Identify unsupported or malformed standalone Stage identities."""
         if any(row.get(field) for field in ("season_number", "episode_number")):
-            return "Theater import cannot include season or episode numbers."
+            return "Stage import cannot include season or episode numbers."
         if row.get("source") not in {Sources.MANUAL.value, Sources.WIKIDATA.value}:
-            return "Theater import requires a manual or Wikidata source."
+            return "Stage import requires a manual or Wikidata source."
         if row["source"] == Sources.WIKIDATA.value:
             try:
                 forms.RegexField(
                     regex=r"\AQ[1-9][0-9]*\Z", max_length=36, strip=False
                 ).clean(row.get("media_id"))
             except ValidationError:
-                return "Theater import requires a valid Wikidata work ID."
+                return "Stage import requires a valid Wikidata work ID."
         return ""
 
-    def _theater_defaults(self, row):
-        """Validate Theater before overwrite bookkeeping or shared item changes."""
-        if row["media_type"] != MediaTypes.THEATER.value:
+    def _stage_defaults(self, row):
+        """Validate Stage before overwrite bookkeeping or shared item changes."""
+        if row["media_type"] != MediaTypes.STAGE.value:
             return {}
-        identity_error = self._theater_identity_error(row)
+        identity_error = self._stage_identity_error(row)
         if identity_error:
             self.warnings.append(identity_error)
             return None
         if not row.get("title", "").strip():
-            self.warnings.append("Theater import requires a work title.")
+            self.warnings.append("Stage import requires a work title.")
             return None
         try:
             work_forms = forms.MultipleChoiceField(
-                choices=app.models.TheaterForms.choices,
-            ).clean(json.loads(row.get("theater_forms") or "[]"))
+                choices=app.models.StageForms.choices,
+            ).clean(json.loads(row.get("stage_forms") or "[]"))
         except (ValueError, TypeError, ValidationError):
-            self.warnings.append(f"{row['title']} (theater): Invalid theater forms.")
+            self.warnings.append(f"{row['title']} (stage): Invalid stage forms.")
             return None
-        attendance = app.forms.TheaterForm(row)
+        attendance = app.forms.StageForm(row)
         if not attendance.is_valid():
             self.warnings.append(
-                f"{row['title']} (theater): {attendance.errors.as_json()}",
+                f"{row['title']} (stage): {attendance.errors.as_json()}",
             )
             return None
         if not row.get("image"):
             row["image"] = settings.IMG_NONE
-        artwork = self._theater_artwork(row)
+        artwork = self._stage_artwork(row)
         if row["source"] == Sources.WIKIDATA.value:
-            row["media_id"] = theater.canonical_id(row["media_id"])
+            row["media_id"] = stage.canonical_id(row["media_id"])
             if artwork:
-                artwork = theater.retarget_artwork(artwork, row["media_id"])
-        return {"theater_forms": work_forms, "theater_artwork": artwork}
+                artwork = stage.retarget_artwork(artwork, row["media_id"])
+        return {"stage_forms": work_forms, "stage_artwork": artwork}
 
-    def _theater_artwork(self, row):
+    def _stage_artwork(self, row):
         """Never restore a provider image while dropping its required credit."""
         if row["source"] != Sources.WIKIDATA.value:
             return {}
         try:
-            record = json.loads(row.get("theater_artwork") or "{}")
+            record = json.loads(row.get("stage_artwork") or "{}")
             restore = (
                 wikipedia.restored_artwork
                 if isinstance(record, dict) and record.get("provider") == "wikipedia"

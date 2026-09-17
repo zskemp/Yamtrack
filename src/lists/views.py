@@ -7,7 +7,7 @@ from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_GET, require_POST
 
-from app import helpers, theater
+from app import helpers, stage
 from app.models import Item, MediaManager, MediaTypes, Sources
 from app.providers import services
 from lists.forms import CustomListForm
@@ -258,8 +258,8 @@ def lists_modal(
     episode_number=None,
 ):
     """Return the modal showing all custom lists and allowing to add to them."""
-    if media_type == MediaTypes.THEATER.value and source == Sources.WIKIDATA.value:
-        media_id = theater.canonical_id(media_id)
+    if media_type == MediaTypes.STAGE.value and source == Sources.WIKIDATA.value:
+        media_id = stage.canonical_id(media_id)
     try:
         item = Item.objects.get(
             media_id=media_id,
@@ -285,8 +285,8 @@ def lists_modal(
             defaults={
                 "title": metadata["title"],
                 "image": metadata["image"],
-                "theater_forms": metadata.get("theater_forms", []),
-                "theater_artwork": metadata.get("theater_artwork", {}),
+                "stage_forms": metadata.get("stage_forms", []),
+                "stage_artwork": metadata.get("stage_artwork", {}),
             },
         )
 

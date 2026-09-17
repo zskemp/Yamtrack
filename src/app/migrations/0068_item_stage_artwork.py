@@ -12,7 +12,7 @@ class Migration(migrations.Migration):
     operations = [
         migrations.AddField(
             model_name='item',
-            name='theater_artwork',
+            name='stage_artwork',
             field=models.JSONField(blank=True, default=dict),
         ),
     ]

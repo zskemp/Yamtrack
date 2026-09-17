@@ -63,10 +63,10 @@ class MediaTypes(models.TextChoices):
     BOOK = "book", "Book"
     COMIC = "comic", "Comic"
     BOARDGAME = "boardgame", "Boardgame"
-    THEATER = "theater", "Theater"
+    STAGE = "stage", "Stage"
 
 
-class TheaterForms(models.TextChoices):
+class StageForms(models.TextChoices):
     """Classifications of a stage work."""
 
     PLAY = "play", "Play"
@@ -76,7 +76,7 @@ class TheaterForms(models.TextChoices):
     OTHER = "other", "Other"
 
 
-class TheaterRedirect(models.Model):
+class StageRedirect(models.Model):
     """Observed Wikidata redirects, independent of mutable catalog metadata."""
 
     alias_id = models.CharField(max_length=36, unique=True)
@@ -107,7 +107,7 @@ class TheaterRedirect(models.Model):
         raise providers.services.ProviderAPIError(
             Sources.WIKIDATA.value,
             ValueError(),
-            "Conflicting Theater redirect chain",
+            "Conflicting Stage redirect chain",
         )
 
 
@@ -129,8 +129,8 @@ class Item(CalendarTriggerMixin, models.Model):
     image = models.URLField()  # if add default, custom media entry will show the value
     season_number = models.PositiveIntegerField(null=True, blank=True)
     episode_number = models.PositiveIntegerField(null=True, blank=True)
-    theater_forms = models.JSONField(default=list, blank=True)
-    theater_artwork = models.JSONField(default=dict, blank=True)
+    stage_forms = models.JSONField(default=list, blank=True)
+    stage_artwork = models.JSONField(default=dict, blank=True)
 
     class Meta:
         """Meta options for the model."""
@@ -798,8 +798,8 @@ class MediaManager(models.Manager):
         episode_number=None,
     ):
         """Get the common filter parameters for media queries."""
-        if media_type == MediaTypes.THEATER.value and source == Sources.WIKIDATA.value:
-            media_id = TheaterRedirect.resolve(media_id)
+        if media_type == MediaTypes.STAGE.value and source == Sources.WIKIDATA.value:
+            media_id = StageRedirect.resolve(media_id)
         params = {
             "item__media_type": media_type,
             "item__source": source,
@@ -1943,13 +1943,19 @@ class Movie(Media):
     tracker = FieldTracker()
 
 
-class Theater(Media):
-    """Personal tracking of a theater work."""
+class Stage(Media):
+    """Personal tracking of a stage work."""
 
     venue = models.CharField(max_length=255, blank=True, default="")
     location = models.CharField(max_length=255, blank=True, default="")
     production = models.CharField(max_length=500, blank=True, default="")
     tracker = FieldTracker()
+
+    class Meta(Media.Meta):
+        """Keep the Stage category name unchanged in admin navigation."""
+
+        abstract = False
+        verbose_name_plural = "stage"
 
     def process_status(self):
         """Record attendance completion without external metadata."""

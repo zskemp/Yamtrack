@@ -64,7 +64,7 @@
           return ['parentSeason', 'image', 'episodeNumber', 'endDate'].includes(field);
         }
     
-        else if (this.mediaType === 'theater') {
+        else if (this.mediaType === 'stage') {
           return ['title', 'image', 'score', 'status', 'endDate', 'notes'].includes(field);
         }
 
@@ -135,10 +135,10 @@
                  value="">
         </div>
 
-        <fieldset x-show="mediaType === 'theater'" x-cloak>
-          <legend class="block text-sm font-medium mb-2 text-gray-300">Theater Forms</legend>
+        <fieldset x-show="mediaType === 'stage'" x-cloak>
+          <legend class="block text-sm font-medium mb-2 text-gray-300">Stage Forms</legend>
           <div class="flex flex-wrap gap-4">
-            {% for checkbox in form.theater_forms %}
+            {% for checkbox in form.stage_forms %}
               <label class="flex items-center gap-2 text-sm text-gray-300">{{ checkbox.tag }} {{ checkbox.choice_label }}</label>
             {% endfor %}
           </div>
@@ -342,7 +342,7 @@
         <div x-show="showField('endDate')">
           <label class="block text-sm font-medium mb-2 text-gray-300"
                  for="entry-end-date"
-                 x-text="mediaType === 'theater' ? 'Date Seen' : 'End Date'">End Date</label>
+                 x-text="mediaType === 'stage' ? 'Date Seen' : 'End Date'">End Date</label>
           <input class="w-full p-2 bg-[#39404b] rounded-md text-white border border-gray-600 focus:outline-none focus:ring-2 focus:ring-[#4a9eff] appearance-none"
                  id="entry-end-date"
                  name="end_date"
@@ -350,7 +350,7 @@
                  value="">
         </div>
 
-        <div x-show="mediaType === 'theater'" x-cloak class="space-y-4">
+        <div x-show="mediaType === 'stage'" x-cloak class="space-y-4">
           <div>
             <label for="entry-venue"
                    class="block text-sm font-medium mb-2 text-gray-300">Venue</label>

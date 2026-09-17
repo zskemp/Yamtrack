@@ -19,8 +19,8 @@ from app.models import (
     MediaTypes,
     Movie,
     Sources,
-    Theater,
-    TheaterRedirect,
+    Stage,
+    StageRedirect,
 )
 from lists.models import CustomList
 
@@ -70,7 +70,7 @@ class MediaSearchViewTests(TestCase):
         )
 
 
-class TheaterRedirectConcurrencyTests(TransactionTestCase):
+class StageRedirectConcurrencyTests(TransactionTestCase):
     """Exercise concurrent HTTP observations against a locking database backend."""
 
     @skipUnlessDBFeature("has_select_for_update")
@@ -80,16 +80,16 @@ class TheaterRedirectConcurrencyTests(TransactionTestCase):
         old = Item.objects.create(
             media_id="Q998",
             source="wikidata",
-            media_type="theater",
+            media_type="stage",
             title="Saved work",
             image="",
-            theater_forms=["play"],
+            stage_forms=["play"],
         )
-        attendance = Theater.objects.create(item=old, user=user, notes="Keep my visit")
+        attendance = Stage.objects.create(item=old, user=user, notes="Keep my visit")
         barrier = Barrier(2)
         thread_state = local()
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )
         fixture["work"]["claims"].pop("P18")
 
@@ -120,7 +120,7 @@ class TheaterRedirectConcurrencyTests(TransactionTestCase):
                 return client.get(
                     reverse(
                         "media_details",
-                        args=["wikidata", "theater", "Q998", "saved-work"],
+                        args=["wikidata", "stage", "Q998", "saved-work"],
                     )
                 ).status_code
             finally:
@@ -137,19 +137,19 @@ class TheaterRedirectConcurrencyTests(TransactionTestCase):
         attendance.refresh_from_db()
         self.assertEqual(
             attendance.item.media_id,
-            TheaterRedirect.objects.get(alias_id="Q998").canonical_id,
+            StageRedirect.objects.get(alias_id="Q998").canonical_id,
         )
         self.assertEqual(attendance.notes, "Keep my visit")
-        self.assertEqual(Item.objects.filter(media_type="theater").count(), 1)
+        self.assertEqual(Item.objects.filter(media_type="stage").count(), 1)
 
 
-class TheaterDiscoveryTests(TestCase):
+class StageDiscoveryTests(TestCase):
     """Exercise discovery and tracking with deterministic external HTTP."""
 
     def setUp(self):
         """Provide work, adaptation, alias and non-work source responses."""
         cache.clear()
-        self.user = get_user_model().objects.create_user(username="theater-reader")
+        self.user = get_user_model().objects.create_user(username="stage-reader")
         self.client.force_login(self.user)
         self.entities = {
             "Q19320959": {
@@ -238,7 +238,6 @@ class TheaterDiscoveryTests(TestCase):
             "id": "Q90002",
             "labels": {"nl": {"value": "Nederlands"}},
         }
-        self.entities["Q1646482"]["aliases"] = {"en": [{"value": "Lin Manuel Miranda"}]}
         self.search_ids = ["Q19320959"]
         calls = []
 
@@ -251,7 +250,7 @@ class TheaterDiscoveryTests(TestCase):
             calls.append((identifiers, props))
             expected = {
                 frozenset({"Q90001"}): "info|claims",
-                frozenset({"Q1646482", "Q90002"}): "labels|aliases",
+                frozenset({"Q1646482", "Q90002"}): "labels",
                 frozenset(
                     {"Q19320959"}
                 ): "info|labels|aliases|descriptions|claims|sitelinks",
@@ -282,24 +281,21 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                reverse("search"), {"media_type": "stage", "q": "Hamilton"}
             )
             item = response.context["data"]["results"][0]["item"]
             self.assertEqual(item["title"], "Hamilton")
-            self.assertEqual(item["theater_forms"], ["musical"])
+            self.assertEqual(item["stage_forms"], ["musical"])
             self.assertEqual(item["synopsis"], "stage musical")
             self.assertEqual(item["details"]["Composers"], "Lin-Manuel Miranda")
             self.assertEqual(item["details"]["original_language"], "Nederlands")
-            self.assertIn(
-                "Lin Manuel Miranda", item["artwork_category_context"]["creators"]
-            )
             self.assertFalse(item["labels_incomplete"])
             self.assertIn(({"Q90002"}, "labels"), calls)
             cache.clear()
             details = self.client.get(
                 reverse(
                     "media_details",
-                    args=["wikidata", "theater", "Q19320959", "hamilton"],
+                    args=["wikidata", "stage", "Q19320959", "hamilton"],
                 )
             )
             self.assertContains(details, "Lin-Manuel Miranda")
@@ -307,7 +303,7 @@ class TheaterDiscoveryTests(TestCase):
     def _batch_source(self):
         """Provide distinct files and controllable failures at the HTTP boundary."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )
         self.search_ids = ["Q822850", "Q822851", "Q822852"]
         for index, identifier in enumerate(self.search_ids):
@@ -367,7 +363,7 @@ class TheaterDiscoveryTests(TestCase):
         source_response, calls, _state = self._batch_source()
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "stage"}
+                reverse("search"), {"media_type": "stage", "q": "stage"}
             )
             results = response.context["data"]["results"]
             self.assertEqual(len(results), 3)
@@ -380,12 +376,12 @@ class TheaterDiscoveryTests(TestCase):
                     f"https://thumb.wikimedia.org/wikipedia/commons/stage-{index}.png",
                 )
                 self.assertEqual(
-                    result["item"]["theater_artwork"]["work_id"], self.search_ids[index]
+                    result["item"]["stage_artwork"]["work_id"], self.search_ids[index]
                 )
-            self.client.get(reverse("search"), {"media_type": "theater", "q": "stage"})
+            self.client.get(reverse("search"), {"media_type": "stage", "q": "stage"})
             self.assertEqual(len(calls), 1)
-            cache.delete("commons_v12_Q822851")
-            self.client.get(reverse("search"), {"media_type": "theater", "q": "stage"})
+            cache.delete("commons_stage_v12_Q822851")
+            self.client.get(reverse("search"), {"media_type": "stage", "q": "stage"})
             self.assertEqual(len(calls), 2)
             self.assertEqual(calls[-1], "File:Stage 1.jpg")
 
@@ -421,10 +417,10 @@ class TheaterDiscoveryTests(TestCase):
             "app.providers.services.session.get", side_effect=normalized_response
         ):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "stage"}
+                reverse("search"), {"media_type": "stage", "q": "stage"}
             )
         self.assertEqual(len(calls), 1)
-        artwork = response.context["data"]["results"][1]["item"]["theater_artwork"]
+        artwork = response.context["data"]["results"][1]["item"]["stage_artwork"]
         self.assertEqual(artwork["title"], "Renamed.jpg")
         self.assertEqual(artwork["work_id"], "Q822851")
 
@@ -437,14 +433,14 @@ class TheaterDiscoveryTests(TestCase):
             patch("app.providers.commons.BATCH_RECOVERY_REQUESTS", 49),
         ):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "stage"}
+                reverse("search"), {"media_type": "stage", "q": "stage"}
             )
         self.assertEqual(
             calls, ["File:Stage 0.jpg", "File:Stage 1.jpg", "File:Stage 2.jpg"]
         )
         results = response.context["data"]["results"]
         self.assertEqual(
-            [bool(result["item"]["theater_artwork"]) for result in results],
+            [bool(result["item"]["stage_artwork"]) for result in results],
             [True, False, True],
         )
 
@@ -465,11 +461,11 @@ class TheaterDiscoveryTests(TestCase):
                     calls.clear()
                     state["mode"] = mode
                     response = self.client.get(
-                        reverse("search"), {"media_type": "theater", "q": "stage"}
+                        reverse("search"), {"media_type": "stage", "q": "stage"}
                     )
                     results = response.context["data"]["results"]
                     self.assertEqual(
-                        [bool(result["item"]["theater_artwork"]) for result in results],
+                        [bool(result["item"]["stage_artwork"]) for result in results],
                         expected_images,
                     )
                     self.assertEqual(len(calls), expected_calls)
@@ -487,23 +483,21 @@ class TheaterDiscoveryTests(TestCase):
         state["mode"] = "file_timeout"
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "stage"}
+                reverse("search"), {"media_type": "stage", "q": "stage"}
             )
             results = response.context["data"]["results"]
             self.assertEqual(len(calls), 4)
-            self.assertTrue(results[0]["item"]["theater_artwork"])
+            self.assertTrue(results[0]["item"]["stage_artwork"])
             self.assertTrue(results[0]["item"]["artwork_partial"])
-            self.assertFalse(results[1]["item"]["theater_artwork"])
-            self.assertTrue(results[2]["item"]["theater_artwork"])
+            self.assertFalse(results[1]["item"]["stage_artwork"])
+            self.assertTrue(results[2]["item"]["stage_artwork"])
             state["mode"] = "success"
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "stage"}
+                reverse("search"), {"media_type": "stage", "q": "stage"}
             )
             results = response.context["data"]["results"]
             self.assertEqual(len(calls), 5)
-            self.assertTrue(
-                all(result["item"]["theater_artwork"] for result in results)
-            )
+            self.assertTrue(all(result["item"]["stage_artwork"] for result in results))
             self.assertFalse(
                 any(result["item"]["artwork_partial"] for result in results)
             )
@@ -526,12 +520,10 @@ class TheaterDiscoveryTests(TestCase):
             patch("app.providers.commons.monotonic", side_effect=clock),
         ):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "stage"}
+                reverse("search"), {"media_type": "stage", "q": "stage"}
             )
         self.assertEqual(calls, ["File:Stage 0.jpg"])
-        self.assertTrue(
-            response.context["data"]["results"][0]["item"]["theater_artwork"]
-        )
+        self.assertTrue(response.context["data"]["results"][0]["item"]["stage_artwork"])
 
     def test_commons_shared_files_preserve_work_identity(self):
         """Deduplicate requests while keeping each work's artwork independent."""
@@ -541,13 +533,13 @@ class TheaterDiscoveryTests(TestCase):
         ] = "Stage 0.jpg"
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "stage"}
+                reverse("search"), {"media_type": "stage", "q": "stage"}
             )
         results = response.context["data"]["results"]
         self.assertEqual(calls, ["File:Stage 0.jpg|File:Stage 2.jpg"])
         self.assertEqual(results[0]["item"]["image"], results[1]["item"]["image"])
         for identifier, result in zip(self.search_ids, results, strict=True):
-            self.assertEqual(result["item"]["theater_artwork"]["work_id"], identifier)
+            self.assertEqual(result["item"]["stage_artwork"]["work_id"], identifier)
 
     def test_commons_batch_continuation_keeps_later_warnings(self):
         """A warning in a later metadata fragment rejects only that file."""
@@ -571,12 +563,12 @@ class TheaterDiscoveryTests(TestCase):
             "app.providers.services.session.get", side_effect=continued_response
         ):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "stage"}
+                reverse("search"), {"media_type": "stage", "q": "stage"}
             )
         results = response.context["data"]["results"]
         self.assertEqual(len(calls), 2)
         self.assertEqual(
-            [bool(result["item"]["theater_artwork"]) for result in results],
+            [bool(result["item"]["stage_artwork"]) for result in results],
             [True, False, True],
         )
 
@@ -603,14 +595,14 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                reverse("search"), {"media_type": "stage", "q": "Hamilton"}
             )
             self.assertEqual(response.status_code, 200)
             self.assertContains(response, "Hamilton")
             details = self.client.get(
                 reverse(
                     "media_details",
-                    args=["wikidata", "theater", "Q19320959", "hamilton"],
+                    args=["wikidata", "stage", "Q19320959", "hamilton"],
                 )
             )
             self.assertEqual(details.status_code, 200)
@@ -618,7 +610,7 @@ class TheaterDiscoveryTests(TestCase):
     def test_direct_image_and_legacy_artwork_survive_without_discovery(self):
         """Resolve known files only and preserve retired evidence in saved backups."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )
         self.entities["Q822850"] = fixture["work"]
         self.search_ids = ["Q822850"]
@@ -644,7 +636,7 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                reverse("search"), {"media_type": "stage", "q": "Bernarda"}
             )
             self.assertContains(response, page["imageinfo"][0]["url"])
             self.client.post(
@@ -652,13 +644,13 @@ class TheaterDiscoveryTests(TestCase):
                 {
                     "media_id": "Q822850",
                     "source": "wikidata",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "status": "Planning",
                 },
             )
             self.assertEqual(len(calls), 1)
             item = Item.objects.get(media_id="Q822850")
-            direct = item.theater_artwork
+            direct = item.stage_artwork
             self.assertEqual(direct["evidence"], "P18/P154")
             legacy = {
                 **direct,
@@ -679,30 +671,28 @@ class TheaterDiscoveryTests(TestCase):
             ]
             for evidence in ("P180", "P373/description"):
                 with self.subTest(evidence=evidence):
-                    item.theater_artwork = {**legacy, "evidence": evidence}
-                    item.save(update_fields=["theater_artwork"])
+                    item.stage_artwork = {**legacy, "evidence": evidence}
+                    item.save(update_fields=["stage_artwork"])
                     cache.clear()
                     response = self.client.get(
-                        reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                        reverse("search"), {"media_type": "stage", "q": "Bernarda"}
                     )
                     self.assertContains(response, item.image)
                     details = self.client.get(
                         reverse(
                             "media_details",
-                            args=["wikidata", "theater", "Q822850", "bernarda"],
+                            args=["wikidata", "stage", "Q822850", "bernarda"],
                         )
                     )
                     self.assertContains(details, item.image)
                     cache.clear()
                     synced = self.client.post(
-                        reverse(
-                            "sync_metadata", args=["wikidata", "theater", "Q822850"]
-                        )
+                        reverse("sync_metadata", args=["wikidata", "stage", "Q822850"])
                     )
                     self.assertLess(synced.status_code, 400)
                     item.refresh_from_db()
                     self.assertEqual(
-                        item.theater_artwork, {**legacy, "evidence": evidence}
+                        item.stage_artwork, {**legacy, "evidence": evidence}
                     )
                     self.assertEqual(len(calls), 1)
             self._assert_category_artwork_restores(legacy)
@@ -710,7 +700,7 @@ class TheaterDiscoveryTests(TestCase):
     def test_imported_nonstring_evidence_does_not_break_artwork_refresh(self):
         """Legacy malformed evidence cannot crash a subsequent source refresh."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )
         self.entities["Q822850"] = fixture["work"]
         self.search_ids = ["Q822850"]
@@ -729,7 +719,7 @@ class TheaterDiscoveryTests(TestCase):
                 {
                     "media_id": "Q822850",
                     "source": "wikidata",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "status": "Planning",
                 },
             )
@@ -739,9 +729,9 @@ class TheaterDiscoveryTests(TestCase):
             for evidence in ([], {}):
                 with self.subTest(evidence=evidence):
                     rows = list(csv.DictReader(StringIO(exported.decode())))
-                    artwork = json.loads(rows[0]["theater_artwork"])
+                    artwork = json.loads(rows[0]["stage_artwork"])
                     artwork["evidence"] = evidence
-                    rows[0]["theater_artwork"] = json.dumps(artwork)
+                    rows[0]["stage_artwork"] = json.dumps(artwork)
                     content = StringIO()
                     writer = csv.DictWriter(content, fieldnames=rows[0].keys())
                     writer.writeheader()
@@ -758,10 +748,15 @@ class TheaterDiscoveryTests(TestCase):
                     )
                     cache.clear()
                     response = self.client.get(
-                        reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                        reverse("search"), {"media_type": "stage", "q": "Bernarda"}
                     )
                     self.assertEqual(response.status_code, 200)
-                    self.assertContains(response, "Test Photographer")
+                    self.assertEqual(
+                        response.context["data"]["results"][0]["item"]["stage_artwork"][
+                            "artist"
+                        ],
+                        "Test Photographer",
+                    )
 
     def test_wikipedia_poster_search_tracking_and_offline_restore(self):
         """Exact article posters retain non-free status and attendance identity."""
@@ -770,7 +765,7 @@ class TheaterDiscoveryTests(TestCase):
         }
         self.search_ids = ["Q19320959", "Q999"]
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )["wikipedia"]
         image = "https://upload.wikimedia.org/wikipedia/en/thumb/a/ab/Hamilton-poster.jpg/250px-Hamilton-poster.jpg"
         calls = []
@@ -800,16 +795,20 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                reverse("search"), {"media_type": "stage", "q": "Hamilton"}
             )
             self.assertContains(response, image)
-            self.assertContains(response, "Non-free")
+            self.assertTrue(
+                response.context["data"]["results"][0]["item"]["stage_artwork"][
+                    "non_free"
+                ]
+            )
             self.client.post(
                 reverse("media_save"),
                 {
                     "media_id": "Q19320959",
                     "source": "wikidata",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "status": "Completed",
                     "notes": "My visit",
                 },
@@ -817,14 +816,15 @@ class TheaterDiscoveryTests(TestCase):
             details = self.client.get(
                 reverse(
                     "media_details",
-                    args=["wikidata", "theater", "Q19320959", "hamilton"],
+                    args=["wikidata", "stage", "Q19320959", "hamilton"],
                 )
             )
             self.assertContains(details, image)
+            self.assertContains(details, "Non-free")
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0]["pilicense"], "any")
         work = Item.objects.get(media_id="Q19320959")
-        self.assertTrue(work.theater_artwork["non_free"])
+        self.assertTrue(work.stage_artwork["non_free"])
         self._assert_saved_wikipedia_poster_survives_outage(source_response, image)
         content = b"".join(self.client.get(reverse("export_csv")).streaming_content)
         work.delete()
@@ -836,13 +836,13 @@ class TheaterDiscoveryTests(TestCase):
                 reverse("import_yamtrack"),
                 {
                     "mode": "new",
-                    "yamtrack_csv": SimpleUploadedFile("theater.csv", content),
+                    "yamtrack_csv": SimpleUploadedFile("stage.csv", content),
                 },
             )
-        attendance = Theater.objects.get(user=self.user)
+        attendance = Stage.objects.get(user=self.user)
         self.assertEqual(attendance.notes, "My visit")
         self.assertEqual(attendance.item.image, image)
-        self.assertTrue(attendance.item.theater_artwork["non_free"])
+        self.assertTrue(attendance.item.stage_artwork["non_free"])
         self._assert_wikipedia_export_rejects_altered_credit(content)
 
     def _assert_saved_wikipedia_poster_survives_outage(self, source_response, image):
@@ -856,13 +856,13 @@ class TheaterDiscoveryTests(TestCase):
         cache.clear()
         with patch("app.providers.services.session.get", side_effect=outage):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                reverse("search"), {"media_type": "stage", "q": "Hamilton"}
             )
             self.assertContains(response, image)
             details = self.client.get(
                 reverse(
                     "media_details",
-                    args=["wikidata", "theater", "Q19320959", "hamilton"],
+                    args=["wikidata", "stage", "Q19320959", "hamilton"],
                 )
             )
             self.assertContains(details, image)
@@ -878,9 +878,9 @@ class TheaterDiscoveryTests(TestCase):
         ):
             with self.subTest(key=key):
                 rows = list(csv.DictReader(StringIO(content.decode())))
-                artwork = json.loads(rows[0]["theater_artwork"])
+                artwork = json.loads(rows[0]["stage_artwork"])
                 artwork[key] = value
-                rows[0]["theater_artwork"] = json.dumps(artwork)
+                rows[0]["stage_artwork"] = json.dumps(artwork)
                 upload = StringIO()
                 writer = csv.DictWriter(upload, fieldnames=rows[0].keys())
                 writer.writeheader()
@@ -895,20 +895,20 @@ class TheaterDiscoveryTests(TestCase):
                         {
                             "mode": "new",
                             "yamtrack_csv": SimpleUploadedFile(
-                                "theater.csv", upload.getvalue().encode()
+                                "stage.csv", upload.getvalue().encode()
                             ),
                         },
                     )
-                attendance = Theater.objects.get(user=self.user)
+                attendance = Stage.objects.get(user=self.user)
                 self.assertEqual(attendance.notes, "My visit")
-                self.assertFalse(attendance.item.theater_artwork)
+                self.assertFalse(attendance.item.stage_artwork)
 
     def test_wikipedia_batches_preserve_valid_posters_when_another_file_is_invalid(
         self,
     ):
         """A bad file cannot suppress another work's verified article image."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )["wikipedia"]
         self.search_ids = ["Q19320959", "Q94000"]
         for identifier, title in (
@@ -948,7 +948,7 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "musical"}
+                reverse("search"), {"media_type": "stage", "q": "musical"}
             )
         results = response.context["data"]["results"]
         self.assertEqual(len(results), 2)
@@ -963,7 +963,7 @@ class TheaterDiscoveryTests(TestCase):
     def test_wikipedia_unavailable_and_rejected_metadata_never_hides_works(self):
         """Reject wrong articles and unsafe files; retry incomplete source responses."""
         original = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )["wikipedia"]
         self.entities["Q19320959"]["sitelinks"] = {
             "enwiki": {"title": "Hamilton (musical)"}
@@ -1020,24 +1020,22 @@ class TheaterDiscoveryTests(TestCase):
                     "app.providers.services.session.get", side_effect=source_response
                 ):
                     response = self.client.get(
-                        reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                        reverse("search"), {"media_type": "stage", "q": "Hamilton"}
                     )
                     self.assertEqual(response.status_code, 200)
                     self.assertEqual(response.context["data"]["total_results"], 1)
                     self.assertFalse(
-                        response.context["data"]["results"][0]["item"][
-                            "theater_artwork"
-                        ]
+                        response.context["data"]["results"][0]["item"]["stage_artwork"]
                     )
                     if case in ("timeout", "null", "missing_metadata"):
                         mode, fixture = "", original
                         recovered = self.client.get(
                             reverse("search"),
-                            {"media_type": "theater", "q": "Hamilton"},
+                            {"media_type": "stage", "q": "Hamilton"},
                         )
                         self.assertEqual(
                             recovered.context["data"]["results"][0]["item"][
-                                "theater_artwork"
+                                "stage_artwork"
                             ]["provider"],
                             "wikipedia",
                         )
@@ -1045,7 +1043,7 @@ class TheaterDiscoveryTests(TestCase):
     def test_wikipedia_multilingual_shared_file_and_redirect_preserve_identity(self):
         """Follow exact article redirects and shared files without title guesses."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )["wikipedia"]
         self.entities["Q19320959"]["sitelinks"] = {
             "enwiki": {"title": "Hamilton (musical)"},
@@ -1093,14 +1091,14 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                reverse("search"), {"media_type": "stage", "q": "Hamilton"}
             )
-        artwork = response.context["data"]["results"][0]["item"]["theater_artwork"]
+        artwork = response.context["data"]["results"][0]["item"]["stage_artwork"]
         self.assertEqual(artwork["language"], "fr")
         self.assertFalse(artwork["non_free"])
         self.assertEqual(artwork["work_id"], "Q19320959")
-        self.assertContains(response, "Hamilton_nouveau")
-        self.assertFalse(TheaterRedirect.objects.exists())
+        self.assertIn("Hamilton_nouveau", artwork["article_url"])
+        self.assertFalse(StageRedirect.objects.exists())
         cache.clear()
         fixture["file"].update(imagerepository="local", pageid=1000, lastrevid=100)
         fixture["file"].pop("missing")
@@ -1113,19 +1111,20 @@ class TheaterDiscoveryTests(TestCase):
         )
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                reverse("search"), {"media_type": "stage", "q": "Hamilton"}
             )
         self.assertEqual(
             response.context["data"]["results"][0]["item"]["image"], info["thumburl"]
         )
-        self.assertContains(
-            response, "https://fr.wikipedia.org/wiki/Utilisateur:Photographe"
+        self.assertIn(
+            "https://fr.wikipedia.org/wiki/Utilisateur:Photographe",
+            response.context["data"]["results"][0]["item"]["stage_artwork"]["artist"],
         )
 
     def test_wikipedia_article_failures_are_isolated_per_work(self):
         """Malformed articles do not discard the valid neighbor in the same batch."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )["wikipedia"]
         self.search_ids = ["Q19320959", "Q94000"]
         for identifier, title in (
@@ -1164,7 +1163,7 @@ class TheaterDiscoveryTests(TestCase):
                 "app.providers.services.session.get", side_effect=source_response
             ):
                 response = self.client.get(
-                    reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                    reverse("search"), {"media_type": "stage", "q": "Hamilton"}
                 )
             results = response.context["data"]["results"]
             self.assertEqual(
@@ -1175,7 +1174,7 @@ class TheaterDiscoveryTests(TestCase):
     def test_wikipedia_site_batches_and_partial_fallback_preserve_saved_poster(self):
         """Batch each site once and keep saved art when a preferred site fails."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )["wikipedia"]
         self.search_ids = ["Q19320959", "Q94000"]
         self.entities["Q19320959"]["sitelinks"] = {
@@ -1191,13 +1190,13 @@ class TheaterDiscoveryTests(TestCase):
         saved = Item.objects.create(
             media_id="Q19320959",
             source="wikidata",
-            media_type="theater",
+            media_type="stage",
             title="Hamilton",
             image=original_image,
-            theater_forms=["musical"],
-            theater_artwork={"provider": "wikipedia", "image": original_image},
+            stage_forms=["musical"],
+            stage_artwork={"provider": "wikipedia", "image": original_image},
         )
-        Theater.objects.create(item=saved, user=self.user, status="Planning")
+        Stage.objects.create(item=saved, user=self.user, status="Planning")
         french_calls = []
 
         def source_response(url, params, **kwargs):
@@ -1234,18 +1233,30 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                reverse("search"), {"media_type": "stage", "q": "Hamilton"}
             )
         self.assertEqual(len(french_calls), 2)
         self.assertEqual(
             response.context["data"]["results"][0]["item"]["image"], original_image
         )
         self.assertEqual(
-            response.context["data"]["results"][1]["item"]["theater_artwork"][
-                "provider"
-            ],
+            response.context["data"]["results"][1]["item"]["stage_artwork"]["provider"],
             "wikipedia",
         )
+        self.assertTrue(
+            response.context["data"]["results"][0]["item"]["artwork_partial"]
+        )
+        with patch("app.providers.services.session.get", side_effect=source_response):
+            details = self.client.get(
+                reverse(
+                    "media_details",
+                    args=["wikidata", "stage", "Q19320959", "hamilton"],
+                )
+            )
+        self.assertEqual(details.status_code, 200)
+        self.assertEqual(details.context["media"]["image"], original_image)
+        self.assertTrue(details.context["media"]["artwork_partial"])
+        self.assertTrue(details.context["media"]["artwork_unavailable"])
         saved.refresh_from_db()
         self.assertEqual(saved.image, original_image)
 
@@ -1264,6 +1275,7 @@ class TheaterDiscoveryTests(TestCase):
             if (
                 url == "https://www.wikidata.org/w/api.php"
                 and params.get("props") == "labels"
+                and "languages" not in params
             ):
                 requested_labels.append(params)
                 response = requests.Response()
@@ -1287,14 +1299,14 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Dear"}
+                reverse("search"), {"media_type": "stage", "q": "Dear"}
             )
             self.assertContains(response, "Dear Fox")
             self.assertContains(response, "Nombre del autor")
             details = self.client.get(
                 reverse(
                     "media_details",
-                    args=["wikidata", "theater", "Q105448367", "dear-fox"],
+                    args=["wikidata", "stage", "Q105448367", "dear-fox"],
                 )
             )
             self.assertContains(details, "Dear Fox")
@@ -1303,7 +1315,7 @@ class TheaterDiscoveryTests(TestCase):
                 {
                     "media_id": "Q105448367",
                     "source": "wikidata",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "status": "Planning",
                 },
             )
@@ -1323,6 +1335,7 @@ class TheaterDiscoveryTests(TestCase):
             if (
                 url == "https://www.wikidata.org/w/api.php"
                 and params.get("props") == "labels"
+                and "languages" not in params
             ):
                 if label_payload == "timeout":
                     raise requests.Timeout
@@ -1362,7 +1375,7 @@ class TheaterDiscoveryTests(TestCase):
                     "app.providers.services.session.get", side_effect=source_response
                 ):
                     response = self.client.get(
-                        reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                        reverse("search"), {"media_type": "stage", "q": "Hamilton"}
                     )
                     self.assertEqual(response.status_code, 200)
                     selected = response.context["data"]["results"][0]["item"]
@@ -1377,13 +1390,13 @@ class TheaterDiscoveryTests(TestCase):
                         }
                     }
                     recovered = self.client.get(
-                        reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                        reverse("search"), {"media_type": "stage", "q": "Hamilton"}
                     )
                     self.assertEqual(
                         recovered.context["data"]["results"][0]["item"]["title"],
                         "Hamilton",
                     )
-        self.assertFalse(TheaterRedirect.objects.exists())
+        self.assertFalse(StageRedirect.objects.exists())
 
     def test_missing_label_lookup_is_bounded_without_hiding_works(self):
         """A later request can finish labels beyond one bounded batch."""
@@ -1400,6 +1413,7 @@ class TheaterDiscoveryTests(TestCase):
             if (
                 url == "https://www.wikidata.org/w/api.php"
                 and params.get("props") == "labels"
+                and "languages" not in params
             ):
                 requested = params["ids"].split("|")
                 label_batches.append(requested)
@@ -1438,7 +1452,7 @@ class TheaterDiscoveryTests(TestCase):
             for expected_title in ("Q99150", "Stage Q99150"):
                 response = self.client.get(
                     reverse("search"),
-                    {"media_type": "theater", "q": "Stage", "page": 3},
+                    {"media_type": "stage", "q": "Stage", "page": 3},
                 )
                 self.assertEqual(response.context["data"]["total_results"], 51)
                 self.assertEqual(
@@ -1456,16 +1470,16 @@ class TheaterDiscoveryTests(TestCase):
             item = Item.objects.create(
                 media_id=identifier,
                 source="wikidata",
-                media_type="theater",
+                media_type="stage",
                 title="Hamilton",
                 image="",
-                theater_forms=["musical"],
+                stage_forms=["musical"],
             )
-            Theater.objects.create(
+            Stage.objects.create(
                 item=item, user=self.user, status="Planning", notes=notes
             )
         content = b"".join(self.client.get(reverse("export_csv")).streaming_content)
-        Item.objects.filter(media_type="theater").delete()
+        Item.objects.filter(media_type="stage").delete()
         with patch(
             "app.providers.services.session.get",
             side_effect=AssertionError("Restore must remain offline"),
@@ -1479,35 +1493,35 @@ class TheaterDiscoveryTests(TestCase):
             )
         self.assertEqual(
             set(
-                Item.objects.filter(media_type="theater").values_list(
+                Item.objects.filter(media_type="stage").values_list(
                     "media_id", flat=True
                 )
             ),
             {"Q998", "Q19320959"},
         )
-        self.assertFalse(TheaterRedirect.objects.exists())
-        before = set(Theater.objects.filter(user=self.user).values_list("pk", "notes"))
+        self.assertFalse(StageRedirect.objects.exists())
+        before = set(Stage.objects.filter(user=self.user).values_list("pk", "notes"))
         self.assertEqual(
             {notes for _identifier, notes in before}, {"First visit", "Second visit"}
         )
         cache.clear()
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            reverse("search"), {"media_type": "stage", "q": "Hamilton"}
         )
         self.assertEqual(len(response.context["data"]["results"]), 1)
         self.assertEqual(
-            set(Theater.objects.filter(user=self.user).values_list("pk", "notes")),
+            set(Stage.objects.filter(user=self.user).values_list("pk", "notes")),
             before,
         )
-        self.assertEqual(Item.objects.filter(media_type="theater").count(), 1)
+        self.assertEqual(Item.objects.filter(media_type="stage").count(), 1)
         self.assertEqual(
-            TheaterRedirect.objects.get(alias_id="Q998").canonical_id, "Q19320959"
+            StageRedirect.objects.get(alias_id="Q998").canonical_id, "Q19320959"
         )
 
     def test_wikipedia_person_only_image_keeps_work_visible(self):
         """Article membership does not make a creator headshot work artwork."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )["wikipedia"]
         self.search_ids = ["Q19320959"]
         self.entities["Q19320959"]["sitelinks"] = {
@@ -1537,26 +1551,26 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                reverse("search"), {"media_type": "stage", "q": "Hamilton"}
             )
             item = response.context["data"]["results"][0]["item"]
             self.assertEqual(item["title"], "Hamilton")
-            self.assertFalse(item["theater_artwork"])
+            self.assertFalse(item["stage_artwork"])
             metadata["ImageDescription"]["value"] = (
                 "Akram Khan performing in the production"
             )
             cache.clear()
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                reverse("search"), {"media_type": "stage", "q": "Hamilton"}
             )
             self.assertTrue(
-                response.context["data"]["results"][0]["item"]["theater_artwork"]
+                response.context["data"]["results"][0]["item"]["stage_artwork"]
             )
 
-    def test_creator_portraits_do_not_illustrate_theater_works(self):
+    def test_creator_portraits_do_not_illustrate_stage_works(self):
         """Person-only photographs are not a substitute for work artwork."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )
         self.entities["Q822850"] = fixture["work"]
         self.search_ids = ["Q822850"]
@@ -1589,10 +1603,10 @@ class TheaterDiscoveryTests(TestCase):
                     cache.clear()
                     info["extmetadata"]["ImageDescription"] = {"value": description}
                     response = self.client.get(
-                        reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                        reverse("search"), {"media_type": "stage", "q": "Bernarda"}
                     )
                     result = response.context["data"]["results"][0]["item"]
-                    self.assertEqual(bool(result["theater_artwork"]), accepted)
+                    self.assertEqual(bool(result["stage_artwork"]), accepted)
                     self.assertEqual(result["media_id"], "Q822850")
 
     def test_explicit_venue_and_staging_evidence_cannot_become_works(self):
@@ -1626,7 +1640,7 @@ class TheaterDiscoveryTests(TestCase):
                     ]
                 self.entities["Q19320959"] = work
                 response = self.client.get(
-                    reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                    reverse("search"), {"media_type": "stage", "q": "Hamilton"}
                 )
                 self.assertEqual(bool(response.context["data"]["results"]), accepted)
                 if not accepted:
@@ -1635,11 +1649,11 @@ class TheaterDiscoveryTests(TestCase):
                         {
                             "media_id": "Q19320959",
                             "source": "wikidata",
-                            "media_type": "theater",
+                            "media_type": "stage",
                             "status": "Planning",
                         },
                     )
-                    self.assertFalse(Theater.objects.filter(user=self.user).exists())
+                    self.assertFalse(Stage.objects.filter(user=self.user).exists())
 
     def test_stage_work_credits_do_not_require_a_separate_production_identity(self):
         """Original-production credits may coexist with independent work evidence."""
@@ -1708,7 +1722,7 @@ class TheaterDiscoveryTests(TestCase):
             if accepted:
                 expected.append(identifier)
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "stage"}
+            reverse("search"), {"media_type": "stage", "q": "stage"}
         )
         self.assertEqual(
             [
@@ -1722,7 +1736,7 @@ class TheaterDiscoveryTests(TestCase):
                 reverse("media_save"),
                 {
                     "source": "wikidata",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "media_id": identifier,
                     "status": "Planning",
                     "notes": "My visit",
@@ -1730,14 +1744,14 @@ class TheaterDiscoveryTests(TestCase):
             )
             details = self.client.get(
                 reverse(
-                    "media_details", args=["wikidata", "theater", identifier, "stage"]
+                    "media_details", args=["wikidata", "stage", identifier, "stage"]
                 )
             )
             self.assertContains(details, "My visit")
         self.assertEqual(
-            set(Theater.objects.values_list("item__media_id", flat=True)), set(expected)
+            set(Stage.objects.values_list("item__media_id", flat=True)), set(expected)
         )
-        self.assertFalse(TheaterRedirect.objects.exists())
+        self.assertFalse(StageRedirect.objects.exists())
 
     def test_mixed_stage_work_remains_discoverable_without_staging_fingerprint(self):
         """A directly classified musical/work remains trackable with a mixed type."""
@@ -1758,7 +1772,7 @@ class TheaterDiscoveryTests(TestCase):
         }
         self.search_ids = ["Q20899421", "Q999"]
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Dear"}
+            reverse("search"), {"media_type": "stage", "q": "Dear"}
         )
         self.assertEqual(
             [work["item"]["media_id"] for work in response.context["data"]["results"]],
@@ -1767,7 +1781,7 @@ class TheaterDiscoveryTests(TestCase):
         details = self.client.get(
             reverse(
                 "media_details",
-                args=["wikidata", "theater", "Q20899421", "dear-evan-hansen"],
+                args=["wikidata", "stage", "Q20899421", "dear-evan-hansen"],
             )
         )
         self.assertContains(details, "Musical")
@@ -1776,14 +1790,14 @@ class TheaterDiscoveryTests(TestCase):
             {
                 "media_id": "Q20899421",
                 "source": "wikidata",
-                "media_type": "theater",
+                "media_type": "stage",
                 "status": "Completed",
                 "venue": "Local Stage",
             },
         )
-        attendance = Theater.objects.get(user=self.user)
+        attendance = Stage.objects.get(user=self.user)
         self.assertEqual(attendance.item.media_id, "Q20899421")
-        self.assertEqual(attendance.item.theater_forms, ["musical"])
+        self.assertEqual(attendance.item.stage_forms, ["musical"])
         self.assertEqual(attendance.venue, "Local Stage")
 
     def test_mixed_work_exception_keeps_production_and_medium_guards(self):
@@ -1838,7 +1852,7 @@ class TheaterDiscoveryTests(TestCase):
                     )
                 self.entities["Q19320959"]["claims"] = claims
                 response = self.client.get(
-                    reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                    reverse("search"), {"media_type": "stage", "q": "Hamilton"}
                 )
                 self.assertEqual(response.context["data"]["total_results"], 0)
                 saved = self.client.post(
@@ -1846,12 +1860,12 @@ class TheaterDiscoveryTests(TestCase):
                     {
                         "media_id": "Q19320959",
                         "source": "wikidata",
-                        "media_type": "theater",
+                        "media_type": "stage",
                         "status": "Planning",
                     },
                 )
                 self.assertEqual(saved.status_code, 500)
-                self.assertFalse(Theater.objects.filter(user=self.user).exists())
+                self.assertFalse(Stage.objects.filter(user=self.user).exists())
 
     def test_specific_source_types_resolve_without_crossing_work_boundaries(self):
         """Recognize specific stage works while excluding production subclasses."""
@@ -1890,25 +1904,25 @@ class TheaterDiscoveryTests(TestCase):
         ]
         self.search_ids = ["Q91001", "Q91002", "Q91003", "Q19320959"]
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Regional"}
+            reverse("search"), {"media_type": "stage", "q": "Regional"}
         )
         works = {
             result["item"]["media_id"]: result["item"]
             for result in response.context["data"]["results"]
         }
         self.assertEqual(set(works), {"Q91001", "Q91003", "Q19320959"})
-        self.assertEqual(works["Q91001"]["theater_forms"], ["opera"])
-        self.assertEqual(works["Q91003"]["theater_forms"], ["musical"])
+        self.assertEqual(works["Q91001"]["stage_forms"], ["opera"])
+        self.assertEqual(works["Q91003"]["stage_forms"], ["musical"])
         self.client.post(
             reverse("media_save"),
             {
                 "media_id": "Q91001",
                 "source": "wikidata",
-                "media_type": "theater",
+                "media_type": "stage",
                 "status": "Planning",
             },
         )
-        self.assertEqual(Item.objects.get(media_id="Q91001").theater_forms, ["opera"])
+        self.assertEqual(Item.objects.get(media_id="Q91001").stage_forms, ["opera"])
 
     def test_explicit_ballet_survives_unresolved_secondary_work_types(self):
         """Swan Lake's broad musical-work ancestry cannot erase its Ballet type."""
@@ -1930,11 +1944,11 @@ class TheaterDiscoveryTests(TestCase):
         }
         self.search_ids = ["Q199786"]
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Swan Lake"}
+            reverse("search"), {"media_type": "stage", "q": "Swan Lake"}
         )
         self.assertContains(response, "Swan Lake")
         self.assertEqual(
-            response.context["data"]["results"][0]["item"]["theater_forms"], ["ballet"]
+            response.context["data"]["results"][0]["item"]["stage_forms"], ["ballet"]
         )
 
     def test_unresolved_type_graphs_never_guess_work_forms(self):
@@ -1974,7 +1988,7 @@ class TheaterDiscoveryTests(TestCase):
             }
             self.search_ids.append(identifier)
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "work"}
+            reverse("search"), {"media_type": "stage", "q": "work"}
         )
         self.assertEqual(
             [
@@ -1989,12 +2003,12 @@ class TheaterDiscoveryTests(TestCase):
                 {
                     "media_id": identifier,
                     "source": "wikidata",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "status": "Planning",
                 },
             )
             self.assertEqual(response.status_code, 500)
-        self.assertFalse(Item.objects.filter(media_type="theater").exists())
+        self.assertFalse(Item.objects.filter(media_type="stage").exists())
 
     def test_label_fallback_finds_specific_subtype_after_filtered_search_misses(self):
         """An ordinary alias query can discover a work with only a specific class."""
@@ -2052,7 +2066,7 @@ class TheaterDiscoveryTests(TestCase):
                     "app.providers.services.session.get", side_effect=source_response
                 ):
                     response = self.client.get(
-                        reverse("search"), {"media_type": "theater", "q": "Local alias"}
+                        reverse("search"), {"media_type": "stage", "q": "Local alias"}
                     )
                 self.assertContains(response, "Regional Opera")
                 self.assertNotContains(response, "Hamilton film")
@@ -2072,19 +2086,19 @@ class TheaterDiscoveryTests(TestCase):
                     "app.providers.services.session.get", side_effect=source_response
                 ):
                     response = self.client.get(
-                        reverse("search"), {"media_type": "theater", "q": "Local alias"}
+                        reverse("search"), {"media_type": "stage", "q": "Local alias"}
                     )
                     self.assertEqual(response.status_code, 200)
                     self.assertContains(response, "Hamilton")
                     self.assertTrue(response.context["data"]["limited"])
                     fallback_unavailable = ""
                     recovered = self.client.get(
-                        reverse("search"), {"media_type": "theater", "q": "Local alias"}
+                        reverse("search"), {"media_type": "stage", "q": "Local alias"}
                     )
                     self.assertContains(recovered, "Regional Opera")
 
         cache.clear()
-        TheaterRedirect.objects.create(
+        StageRedirect.objects.create(
             alias_id="Q94002", canonical_id="Q999", revision=10
         )
         self.entities["Q94002"].update(
@@ -2094,11 +2108,11 @@ class TheaterDiscoveryTests(TestCase):
         )
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Local alias"}
+                reverse("search"), {"media_type": "stage", "q": "Local alias"}
             )
-        self.assertContains(response, "Conflicting Theater identity", status_code=500)
+        self.assertContains(response, "Conflicting Stage identity", status_code=500)
         self.assertEqual(
-            TheaterRedirect.objects.get(alias_id="Q94002").canonical_id, "Q999"
+            StageRedirect.objects.get(alias_id="Q94002").canonical_id, "Q999"
         )
 
     def test_leading_article_fallback_finds_trackable_work_without_merging(self):
@@ -2132,7 +2146,7 @@ class TheaterDiscoveryTests(TestCase):
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
                 reverse("search"),
-                {"media_type": "theater", "q": "  tHe   Lehman Trilogy  "},
+                {"media_type": "stage", "q": "  tHe   Lehman Trilogy  "},
             )
             results = response.context["data"]["results"]
             self.assertEqual(
@@ -2145,13 +2159,13 @@ class TheaterDiscoveryTests(TestCase):
                 ['inlabel:"tHe Lehman Trilogy@*"', 'inlabel:"Lehman Trilogy@*"'],
             )
             self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "tHe Lehman Trilogy"}
+                reverse("search"), {"media_type": "stage", "q": "tHe Lehman Trilogy"}
             )
             self.assertEqual(len(calls), 3)
             cache.clear()
             calls.clear()
             shorter = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Lehman Trilogy"}
+                reverse("search"), {"media_type": "stage", "q": "Lehman Trilogy"}
             )
             self.assertEqual(
                 [
@@ -2169,7 +2183,7 @@ class TheaterDiscoveryTests(TestCase):
                 {
                     "media_id": "Q30888980",
                     "source": "wikidata",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "status": "Planning",
                     "notes": "Found by ordinary title",
                 },
@@ -2177,11 +2191,11 @@ class TheaterDiscoveryTests(TestCase):
             details = self.client.get(
                 reverse(
                     "media_details",
-                    args=["wikidata", "theater", "Q30888980", "lehman-trilogy"],
+                    args=["wikidata", "stage", "Q30888980", "lehman-trilogy"],
                 )
             )
             self.assertContains(details, "Found by ordinary title")
-            self.assertFalse(TheaterRedirect.objects.exists())
+            self.assertFalse(StageRedirect.objects.exists())
 
     def test_article_fallback_respects_literal_results_and_remaining_budget(self):
         """Do not rewrite useful, unfinished, exhausted or non-article queries."""
@@ -2236,7 +2250,7 @@ class TheaterDiscoveryTests(TestCase):
                     "app.providers.services.session.get", side_effect=source_response
                 ):
                     response = self.client.get(
-                        reverse("search"), {"media_type": "theater", "q": query}
+                        reverse("search"), {"media_type": "stage", "q": query}
                     )
                 self.assertEqual(len(calls), expected_calls)
                 self.assertEqual(
@@ -2272,7 +2286,7 @@ class TheaterDiscoveryTests(TestCase):
         query = 'The Stage "Name" \\'
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": query}
+                reverse("search"), {"media_type": "stage", "q": query}
             )
             self.assertEqual(response.status_code, 200)
             self.assertTrue(response.context["data"]["limited"])
@@ -2281,7 +2295,7 @@ class TheaterDiscoveryTests(TestCase):
             available = True
             continued = True
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": query}
+                reverse("search"), {"media_type": "stage", "q": query}
             )
             self.assertEqual(len(calls), 6)
             self.assertTrue(response.context["data"]["limited"])
@@ -2338,7 +2352,7 @@ class TheaterDiscoveryTests(TestCase):
                     "app.providers.services.session.get", side_effect=source_response
                 ):
                     response = self.client.get(
-                        reverse("search"), {"media_type": "theater", "q": "Stage"}
+                        reverse("search"), {"media_type": "stage", "q": "Stage"}
                     )
                 self.assertEqual(
                     response.context["data"]["total_results"], result_count
@@ -2393,7 +2407,7 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Opera"}
+                reverse("search"), {"media_type": "stage", "q": "Opera"}
             )
         self.assertEqual(len(requested_classes), 50)
         self.assertEqual(response.context["data"]["total_results"], 50)
@@ -2423,7 +2437,7 @@ class TheaterDiscoveryTests(TestCase):
         }
         self.search_ids = ["Q19320959", "Q97002"]
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Opera"}
+            reverse("search"), {"media_type": "stage", "q": "Opera"}
         )
         self.assertEqual(
             [
@@ -2473,7 +2487,7 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Regional"}
+                reverse("search"), {"media_type": "stage", "q": "Regional"}
             )
             self.assertEqual(
                 [
@@ -2493,7 +2507,7 @@ class TheaterDiscoveryTests(TestCase):
             )
             cache.clear()
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Regional"}
+                reverse("search"), {"media_type": "stage", "q": "Regional"}
             )
             self.assertEqual(response.context["data"]["results"], [])
 
@@ -2558,7 +2572,7 @@ class TheaterDiscoveryTests(TestCase):
             if accepted:
                 expected.append(identifier)
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "stage"}
+            reverse("search"), {"media_type": "stage", "q": "stage"}
         )
         self.assertEqual(
             [
@@ -2573,19 +2587,19 @@ class TheaterDiscoveryTests(TestCase):
                 {
                     "media_id": identifier,
                     "source": "wikidata",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "status": "Planning",
                     "notes": "Stage work remains trackable",
                 },
             )
             details = self.client.get(
                 reverse(
-                    "media_details", args=["wikidata", "theater", identifier, "stage"]
+                    "media_details", args=["wikidata", "stage", identifier, "stage"]
                 )
             )
             self.assertContains(details, "Stage work remains trackable")
         self.assertEqual(
-            set(Theater.objects.values_list("item__media_id", flat=True)), set(expected)
+            set(Stage.objects.values_list("item__media_id", flat=True)), set(expected)
         )
 
     def test_form_and_genre_subtypes_cannot_hide_medium_conflicts(self):
@@ -2616,7 +2630,7 @@ class TheaterDiscoveryTests(TestCase):
             }
             self.search_ids.append(identifier)
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "work"}
+            reverse("search"), {"media_type": "stage", "q": "work"}
         )
         self.assertEqual(response.context["data"]["results"], [])
 
@@ -2636,7 +2650,7 @@ class TheaterDiscoveryTests(TestCase):
                 },
             )
         self.assertEqual(
-            Item.objects.get(media_id="Q822850").theater_artwork,
+            Item.objects.get(media_id="Q822850").stage_artwork,
             {**artwork, "evidence_work_id": "Q822850"},
         )
         for field, value in (
@@ -2649,12 +2663,12 @@ class TheaterDiscoveryTests(TestCase):
         ):
             with self.subTest(field=field, value=value):
                 rows = list(csv.DictReader(StringIO(exported.decode())))
-                incomplete = json.loads(rows[0]["theater_artwork"])
+                incomplete = json.loads(rows[0]["stage_artwork"])
                 if value is None:
                     incomplete.pop(field)
                 else:
                     incomplete[field] = value
-                rows[0]["theater_artwork"] = json.dumps(incomplete)
+                rows[0]["stage_artwork"] = json.dumps(incomplete)
                 broken = StringIO()
                 writer = csv.DictWriter(broken, fieldnames=rows[0].keys())
                 writer.writeheader()
@@ -2669,14 +2683,12 @@ class TheaterDiscoveryTests(TestCase):
                         ),
                     },
                 )
-                self.assertEqual(
-                    Item.objects.get(media_id="Q822850").theater_artwork, {}
-                )
+                self.assertEqual(Item.objects.get(media_id="Q822850").stage_artwork, {})
 
     def test_source_assessed_dust_jacket_basis_preserves_its_scope(self):
         """A named jacket grant carries its US-only and reproduction caveats."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )
         self.entities["Q822850"] = fixture["work"]
         self.search_ids = ["Q822850"]
@@ -2713,24 +2725,24 @@ class TheaterDiscoveryTests(TestCase):
                 reverse("media_save"),
                 {
                     "media_id": "Q822850",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "source": "wikidata",
                     "status": "Completed",
                 },
             )
         item = Item.objects.get(media_id="Q822850")
         self.assertEqual(item.image, page["imageinfo"][0]["url"])
-        self.assertEqual(item.theater_artwork["basis"], "pd-us-dust-jacket")
-        self.assertIn("United States", item.theater_artwork["basis_notice"])
-        self.assertIn("PD-Art", item.theater_artwork["notices"])
+        self.assertEqual(item.stage_artwork["basis"], "pd-us-dust-jacket")
+        self.assertIn("United States", item.stage_artwork["basis_notice"])
+        self.assertIn("PD-Art", item.stage_artwork["notices"])
         self.assertIn(
-            "without a separate copyright notice", item.theater_artwork["permission"]
+            "without a separate copyright notice", item.stage_artwork["permission"]
         )
 
     def test_image_history_continuation_does_not_replace_current_artwork(self):
         """Older file uploads are not missing rights metadata for the current image."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )
         self.entities["Q822850"] = fixture["work"]
         self.search_ids = ["Q822850"]
@@ -2759,17 +2771,20 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                reverse("search"), {"media_type": "stage", "q": "Bernarda"}
             )
         self.assertContains(
             response, fixture["commons"]["query"]["pages"]["123"]["imageinfo"][0]["url"]
         )
-        self.assertContains(response, "Test Photographer")
+        self.assertEqual(
+            response.context["data"]["results"][0]["item"]["stage_artwork"]["artist"],
+            "Test Photographer",
+        )
 
     def test_artwork_metadata_continuation_preserves_complete_rights_checks(self):
         """Paginated file metadata is merged before accepting or rejecting an image."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )
         self.entities["Q822850"] = fixture["work"]
         self.search_ids = ["Q822850"]
@@ -2813,15 +2828,20 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                reverse("search"), {"media_type": "stage", "q": "Bernarda"}
             )
             self.assertContains(response, page["imageinfo"][0]["url"])
-            self.assertContains(response, "Test Photographer")
+            self.assertEqual(
+                response.context["data"]["results"][0]["item"]["stage_artwork"][
+                    "artist"
+                ],
+                "Test Photographer",
+            )
             self.client.post(
                 reverse("media_save"),
                 {
                     "media_id": "Q822850",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "source": "wikidata",
                     "status": "Completed",
                 },
@@ -2830,7 +2850,7 @@ class TheaterDiscoveryTests(TestCase):
             cache.clear()
             incomplete = self.client.get(
                 reverse(
-                    "media_details", args=["wikidata", "theater", "Q822850", "bernarda"]
+                    "media_details", args=["wikidata", "stage", "Q822850", "bernarda"]
                 )
             )
             self.assertEqual(
@@ -2841,7 +2861,7 @@ class TheaterDiscoveryTests(TestCase):
             cache.clear()
             incomplete = self.client.get(
                 reverse(
-                    "media_details", args=["wikidata", "theater", "Q822850", "bernarda"]
+                    "media_details", args=["wikidata", "stage", "Q822850", "bernarda"]
                 )
             )
             self.assertTrue(incomplete.context["media"]["artwork_unavailable"])
@@ -2851,7 +2871,7 @@ class TheaterDiscoveryTests(TestCase):
             cache.clear()
             self.client.get(
                 reverse(
-                    "media_details", args=["wikidata", "theater", "Q822850", "bernarda"]
+                    "media_details", args=["wikidata", "stage", "Q822850", "bernarda"]
                 )
             )
             self.assertEqual(
@@ -2861,7 +2881,7 @@ class TheaterDiscoveryTests(TestCase):
             final_templates.append({"title": "Template:No permission since"})
             cache.clear()
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                reverse("search"), {"media_type": "stage", "q": "Bernarda"}
             )
             self.assertNotContains(response, page["imageinfo"][0]["url"])
             self.assertContains(response, "The House of Bernarda Alba")
@@ -2869,7 +2889,7 @@ class TheaterDiscoveryTests(TestCase):
     def test_invalid_file_continuations_leave_work_results_available(self):
         """Missing files and malformed continuation fragments never qualify images."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )
         self.entities["Q822850"] = fixture["work"]
         self.search_ids = ["Q822850"]
@@ -2911,17 +2931,17 @@ class TheaterDiscoveryTests(TestCase):
                 with self.subTest(mode=mode):
                     cache.clear()
                     response = self.client.get(
-                        reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                        reverse("search"), {"media_type": "stage", "q": "Bernarda"}
                     )
                     self.assertContains(response, "The House of Bernarda Alba")
                     result = response.context["data"]["results"][0]["item"]
                     self.assertTrue(result["artwork_unavailable"])
-                    self.assertFalse(result["theater_artwork"])
+                    self.assertFalse(result["stage_artwork"])
 
     def test_later_artwork_batch_failure_keeps_an_already_verified_image(self):
         """A failed optional candidate batch cannot discard a verified image."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )
         fixture["work"]["claims"]["P18"] = [
             {"mainsnak": {"datavalue": {"value": filename}}}
@@ -2955,30 +2975,33 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                reverse("search"), {"media_type": "stage", "q": "Bernarda"}
             )
             details = self.client.get(
                 reverse(
-                    "media_details", args=["wikidata", "theater", "Q822850", "bernarda"]
+                    "media_details", args=["wikidata", "stage", "Q822850", "bernarda"]
                 )
             )
             self.assertContains(details, "Test Photographer")
             recovered = True
             retry = self.client.get(
                 reverse(
-                    "media_details", args=["wikidata", "theater", "Q822850", "bernarda"]
+                    "media_details", args=["wikidata", "stage", "Q822850", "bernarda"]
                 )
             )
             self.assertContains(retry, poster_url)
         self.assertContains(
             response, fixture["commons"]["query"]["pages"]["123"]["imageinfo"][0]["url"]
         )
-        self.assertContains(response, "Test Photographer")
+        self.assertEqual(
+            response.context["data"]["results"][0]["item"]["stage_artwork"]["artist"],
+            "Test Photographer",
+        )
 
     def test_artwork_deadline_is_shared_across_displayed_works(self):
         """Slow image enrichment stops without losing eligible work results."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )
         self.search_ids = ["Q822850", "Q822851", "Q822852", "Q822853"]
         for identifier in self.search_ids:
@@ -3016,21 +3039,19 @@ class TheaterDiscoveryTests(TestCase):
             ),
         ):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "stage"}
+                reverse("search"), {"media_type": "stage", "q": "stage"}
             )
         results = response.context["data"]["results"]
         self.assertEqual(len(results), 4)
-        self.assertTrue(
-            all(result["item"]["theater_artwork"] for result in results[:3])
-        )
-        self.assertFalse(results[3]["item"]["theater_artwork"])
+        self.assertTrue(all(result["item"]["stage_artwork"] for result in results[:3]))
+        self.assertFalse(results[3]["item"]["stage_artwork"])
         self.assertTrue(results[3]["item"]["artwork_unavailable"])
         self.assertContains(response, "Q822853")
 
     def test_artwork_request_budget_limits_a_page_without_hiding_works(self):
         """Fast responses still respect the page call cap and next requests reset it."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )
         self.search_ids = [f"Q{number}" for number in range(40000, 40020)]
         for identifier in self.search_ids:
@@ -3069,20 +3090,18 @@ class TheaterDiscoveryTests(TestCase):
             patch("app.providers.commons.monotonic", return_value=0),
         ):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "stage"}
+                reverse("search"), {"media_type": "stage", "q": "stage"}
             )
             results = response.context["data"]["results"]
             self.assertEqual(len(results), 20)
             self.assertEqual(len(calls), 48)
             illustrated = sum(
-                bool(result["item"]["theater_artwork"]) for result in results
+                bool(result["item"]["stage_artwork"]) for result in results
             )
             self.assertGreater(illustrated, 0)
             self.assertLess(illustrated, 20)
             details = self.client.get(
-                reverse(
-                    "media_details", args=["wikidata", "theater", "Q40019", "stage"]
-                )
+                reverse("media_details", args=["wikidata", "stage", "Q40019", "stage"])
             )
             self.assertContains(details, "Test Photographer")
 
@@ -3114,7 +3133,7 @@ class TheaterDiscoveryTests(TestCase):
             }
             self.search_ids.extend([identifier, parent])
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "ballet"}
+            reverse("search"), {"media_type": "stage", "q": "ballet"}
         )
         self.assertEqual(
             {
@@ -3123,7 +3142,7 @@ class TheaterDiscoveryTests(TestCase):
             },
             {"Q21056532", "Q1158756"},
         )
-        self.assertFalse(TheaterRedirect.objects.exists())
+        self.assertFalse(StageRedirect.objects.exists())
 
     def test_named_source_relationships_do_not_create_speculative_equivalence(self):
         """Accepted duplicate-looking work records remain separate without redirects."""
@@ -3192,7 +3211,7 @@ class TheaterDiscoveryTests(TestCase):
                 },
             }
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "stage works"}
+            reverse("search"), {"media_type": "stage", "q": "stage works"}
         )
         self.assertEqual(
             [
@@ -3206,19 +3225,19 @@ class TheaterDiscoveryTests(TestCase):
                 reverse("media_save"),
                 {
                     "media_id": identifier,
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "source": "wikidata",
                     "status": "Completed",
                 },
             )
-        self.assertEqual(Theater.objects.filter(user=self.user).count(), 6)
-        self.assertEqual(Item.objects.filter(media_type="theater").count(), 6)
-        self.assertFalse(TheaterRedirect.objects.exists())
+        self.assertEqual(Stage.objects.filter(user=self.user).count(), 6)
+        self.assertEqual(Item.objects.filter(media_type="stage").count(), 6)
+        self.assertFalse(StageRedirect.objects.exists())
 
     def test_us_public_domain_assessment_preserves_jurisdiction_and_source(self):
         """An explicit US assessment retains source context through offline restore."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )
         self.entities["Q822850"] = fixture["work"]
         self.search_ids = ["Q822850"]
@@ -3247,18 +3266,19 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                reverse("search"), {"media_type": "stage", "q": "Bernarda"}
             )
             self.assertContains(response, page["imageinfo"][0]["url"])
-            self.assertContains(response, "outside the United States")
-            self.assertContains(response, "Theatre Magazine, January 1919")
+            artwork = response.context["data"]["results"][0]["item"]["stage_artwork"]
+            self.assertIn("outside the United States", artwork["basis_notice"])
+            self.assertIn("Theatre Magazine, January 1919", artwork["credit"])
             self._assert_us_assessment_rejections(page, source_response)
             self.client.post(
                 reverse("media_save"),
                 {
                     "media_id": "Q822850",
                     "source": "wikidata",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "status": "Completed",
                 },
             )
@@ -3277,13 +3297,11 @@ class TheaterDiscoveryTests(TestCase):
             )
         restored = Item.objects.get(media_id="Q822850")
         self.assertEqual(restored.image, page["imageinfo"][0]["url"])
-        self.assertEqual(restored.theater_artwork["basis"], "pd-us")
+        self.assertEqual(restored.stage_artwork["basis"], "pd-us")
         self.assertIn(
-            "outside the United States", restored.theater_artwork["basis_notice"]
+            "outside the United States", restored.stage_artwork["basis_notice"]
         )
-        self.assertEqual(
-            restored.theater_artwork["credit"], metadata["Credit"]["value"]
-        )
+        self.assertEqual(restored.stage_artwork["credit"], metadata["Credit"]["value"])
 
     def _assert_us_assessment_rejections(self, page, source_response):
         """Keep incomplete and disputed US assessments out of search artwork."""
@@ -3319,11 +3337,11 @@ class TheaterDiscoveryTests(TestCase):
                     "app.providers.services.session.get", side_effect=source_response
                 ):
                     response = self.client.get(
-                        reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                        reverse("search"), {"media_type": "stage", "q": "Bernarda"}
                     )
                 self.assertContains(response, "The House of Bernarda Alba")
                 self.assertFalse(
-                    response.context["data"]["results"][0]["item"]["theater_artwork"]
+                    response.context["data"]["results"][0]["item"]["stage_artwork"]
                 )
         page.clear()
         page.update(original)
@@ -3332,7 +3350,7 @@ class TheaterDiscoveryTests(TestCase):
     def test_public_domain_logo_and_standard_notices_remain_usable(self):
         """Published public-domain bases and standard notices do not hide images."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )
         self.entities["Q822850"] = fixture["work"]
         self.search_ids = ["Q822850"]
@@ -3360,16 +3378,17 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                reverse("search"), {"media_type": "stage", "q": "Bernarda"}
             )
             self.assertContains(response, page["imageinfo"][0]["url"])
-            self.assertContains(response, "Public domain")
-            self.assertContains(response, "originality")
+            artwork = response.context["data"]["results"][0]["item"]["stage_artwork"]
+            self.assertEqual(artwork["license"], "Public domain")
+            self.assertIn("originality", artwork["basis_notice"])
             page["templates"] = [{"title": "Template:PD-old-auto-expired"}]
             page["categories"] = [{"title": "Category:PD Old auto: no death date"}]
             cache.clear()
             rejected = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                reverse("search"), {"media_type": "stage", "q": "Bernarda"}
             )
             self.assertNotContains(rejected, page["imageinfo"][0]["url"])
             page["templates"] = [{"title": "Template:PD-textlogo"}]
@@ -3380,7 +3399,7 @@ class TheaterDiscoveryTests(TestCase):
                 {
                     "media_id": "Q822850",
                     "source": "wikidata",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "status": "Completed",
                     "notes": "Public domain artwork round trip",
                 },
@@ -3397,11 +3416,11 @@ class TheaterDiscoveryTests(TestCase):
                     reverse("import_yamtrack"),
                     {
                         "mode": "new",
-                        "yamtrack_csv": SimpleUploadedFile("theater.csv", exported),
+                        "yamtrack_csv": SimpleUploadedFile("stage.csv", exported),
                     },
                 )
             restored = Item.objects.get(media_id="Q822850")
-            self.assertEqual(restored.theater_artwork["basis"], "pd-textlogo")
+            self.assertEqual(restored.stage_artwork["basis"], "pd-textlogo")
             self.assertEqual(restored.image, page["imageinfo"][0]["url"])
             page["templates"] = [
                 {"title": "Template:Cc-by-sa-4.0"},
@@ -3415,21 +3434,26 @@ class TheaterDiscoveryTests(TestCase):
             metadata["Restrictions"] = {"value": "personality|trademark"}
             cache.clear()
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                reverse("search"), {"media_type": "stage", "q": "Bernarda"}
             )
             self.assertContains(response, page["imageinfo"][0]["url"])
-            self.assertContains(response, "personality")
+            self.assertIn(
+                "personality",
+                response.context["data"]["results"][0]["item"]["stage_artwork"][
+                    "notices"
+                ],
+            )
             page["templates"].append({"title": "Template:No permission since"})
             cache.clear()
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                reverse("search"), {"media_type": "stage", "q": "Bernarda"}
             )
             self.assertNotContains(response, page["imageinfo"][0]["url"])
 
     def test_migrated_license_preserves_file_specific_disclaimer(self):
         """Migrated image grants retain the actual source disclaimer URL."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )
         self.entities["Q822850"] = fixture["work"]
         self.search_ids = ["Q822850"]
@@ -3469,19 +3493,24 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                reverse("search"), {"media_type": "stage", "q": "Bernarda"}
             )
-            self.assertContains(response, disclaimer)
+            self.assertIn(
+                disclaimer,
+                response.context["data"]["results"][0]["item"]["stage_artwork"][
+                    "notices"
+                ],
+            )
             self.client.post(
                 reverse("media_save"),
                 {
                     "media_id": "Q822850",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "source": "wikidata",
                     "status": "Completed",
                 },
             )
-        self.assertIn(disclaimer, Item.objects.get().theater_artwork["notices"])
+        self.assertIn(disclaimer, Item.objects.get().stage_artwork["notices"])
 
     def test_explicit_medium_and_granularity_override_form_claims(self):
         """Production and broadcast types cannot become stage works via a form."""
@@ -3510,7 +3539,7 @@ class TheaterDiscoveryTests(TestCase):
             }
             self.search_ids.append(identifier)
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            reverse("search"), {"media_type": "stage", "q": "Hamilton"}
         )
         self.assertContains(response, "Hamilton")
         self.assertNotContains(response, "Nonstage Record")
@@ -3536,7 +3565,7 @@ class TheaterDiscoveryTests(TestCase):
             }
             self.search_ids.append(identifier)
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Work"}
+            reverse("search"), {"media_type": "stage", "q": "Work"}
         )
         for _identifier, title, _work_type, _genre, label in cases:
             self.assertContains(response, title)
@@ -3546,22 +3575,22 @@ class TheaterDiscoveryTests(TestCase):
             {
                 "media_id": "Q3003",
                 "source": "wikidata",
-                "media_type": "theater",
+                "media_type": "stage",
                 "status": "Planning",
             },
         )
-        self.assertEqual(Item.objects.get(media_id="Q3003").theater_forms, ["other"])
+        self.assertEqual(Item.objects.get(media_id="Q3003").stage_forms, ["other"])
 
     def test_search_details_and_tracking_use_one_work_identity(self):
         """Ordinary title search excludes film and resolves redirects on save."""
         listed = self.client.get(
-            reverse("lists_modal", args=["wikidata", "theater", "Q998"])
+            reverse("lists_modal", args=["wikidata", "stage", "Q998"])
         )
         self.assertEqual(listed.status_code, 200)
         self.assertEqual(Item.objects.get().media_id, "Q19320959")
-        self.assertEqual(Item.objects.get().theater_forms, ["musical"])
+        self.assertEqual(Item.objects.get().stage_forms, ["musical"])
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            reverse("search"), {"media_type": "stage", "q": "Hamilton"}
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
@@ -3572,52 +3601,48 @@ class TheaterDiscoveryTests(TestCase):
         self.assertContains(response, "Lin-Manuel Miranda")
         self.assertNotContains(response, "Hamilton film")
         details = self.client.get(
-            reverse("media_details", args=["wikidata", "theater", "Q998", "hamilton"])
+            reverse("media_details", args=["wikidata", "stage", "Q998", "hamilton"])
         )
         self.assertEqual(details.context["media"]["media_id"], "Q19320959")
         for identifier in ["Q998", "Q19320959"]:
             self.client.post(
                 reverse("media_save"),
                 {
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "source": "wikidata",
                     "media_id": identifier,
                     "status": "Completed",
                     "venue": "Local Theatre",
                 },
             )
-        self.assertEqual(Item.objects.filter(media_type="theater").count(), 1)
-        self.assertEqual(Theater.objects.filter(item__media_id="Q19320959").count(), 2)
-        self.assertEqual(
-            Item.objects.get(media_type="theater").theater_forms, ["musical"]
-        )
+        self.assertEqual(Item.objects.filter(media_type="stage").count(), 1)
+        self.assertEqual(Stage.objects.filter(item__media_id="Q19320959").count(), 2)
+        self.assertEqual(Item.objects.get(media_type="stage").stage_forms, ["musical"])
 
     def test_saved_redirect_preserves_attendance_history_and_memberships(self):
         """Verified redirects reconcile saved works without merging attendances."""
         old = Item.objects.create(
             media_id="Q998",
             source="wikidata",
-            media_type="theater",
+            media_type="stage",
             title="Old Hamilton",
             image="",
-            theater_forms=["musical"],
+            stage_forms=["musical"],
         )
         target = Item.objects.create(
             media_id="Q19320959",
             source="wikidata",
-            media_type="theater",
+            media_type="stage",
             title="Hamilton",
             image="",
-            theater_forms=["musical"],
+            stage_forms=["musical"],
         )
-        first = Theater.objects.create(
+        first = Stage.objects.create(
             item=old, user=self.user, notes="First visit", venue="First Theatre"
         )
-        second = Theater.objects.create(
-            item=target, user=self.user, notes="Second visit"
-        )
+        second = Stage.objects.create(item=target, user=self.user, notes="Second visit")
         other = get_user_model().objects.create_user(username="other-attendee")
-        private = Theater.objects.create(item=old, user=other, notes="Private visit")
+        private = Stage.objects.create(item=old, user=other, notes="Private visit")
         history_ids = list(first.history.values_list("history_id", flat=True))
         custom_list = CustomList.objects.create(name="Stage works", owner=self.user)
         custom_list.items.add(old, target)
@@ -3625,7 +3650,7 @@ class TheaterDiscoveryTests(TestCase):
         old_export = b"".join(self.client.get(reverse("export_csv")).streaming_content)
 
         response = self.client.get(
-            reverse("media_details", args=["wikidata", "theater", "Q998", "hamilton"])
+            reverse("media_details", args=["wikidata", "stage", "Q998", "hamilton"])
         )
         self.assertContains(response, "First visit")
         self.assertContains(response, "Second visit")
@@ -3643,7 +3668,7 @@ class TheaterDiscoveryTests(TestCase):
             list(other.notification_excluded_items.values_list("pk", flat=True)),
             [target.pk],
         )
-        self.assertEqual(Item.objects.filter(media_type="theater").count(), 1)
+        self.assertEqual(Item.objects.filter(media_type="stage").count(), 1)
         reader = get_user_model().objects.create_user(username="restore-attendee")
         self.client.force_login(reader)
         with patch("app.providers.services.session.get", side_effect=requests.Timeout):
@@ -3655,18 +3680,18 @@ class TheaterDiscoveryTests(TestCase):
                 },
             )
             listing = self.client.get(
-                reverse("medialist", args=[reader.username, "theater"])
+                reverse("medialist", args=[reader.username, "stage"])
             )
             self.assertEqual(listing.status_code, 200)
             modal = self.client.get(
-                reverse("lists_modal", args=["wikidata", "theater", "Q998"])
+                reverse("lists_modal", args=["wikidata", "stage", "Q998"])
             )
             self.assertEqual(modal.status_code, 200)
         self.assertEqual(
-            set(Theater.objects.filter(user=reader).values_list("item_id", flat=True)),
+            set(Stage.objects.filter(user=reader).values_list("item_id", flat=True)),
             {target.pk},
         )
-        self.assertEqual(Theater.objects.filter(user=reader).count(), 2)
+        self.assertEqual(Stage.objects.filter(user=reader).count(), 2)
         new_export = b"".join(self.client.get(reverse("export_csv")).streaming_content)
         self.assertEqual(
             {row["media_id"] for row in csv.DictReader(StringIO(new_export.decode()))},
@@ -3678,11 +3703,11 @@ class TheaterDiscoveryTests(TestCase):
         old = Item.objects.create(
             media_id="Q998",
             source="wikidata",
-            media_type="theater",
+            media_type="stage",
             title="Hamilton",
             image="https://thumb.wikimedia.org/stage.jpg",
-            theater_forms=["musical"],
-            theater_artwork={
+            stage_forms=["musical"],
+            stage_artwork={
                 "work_id": "Q998",
                 "work_revision": 100,
                 "evidence": "P18",
@@ -3692,12 +3717,12 @@ class TheaterDiscoveryTests(TestCase):
         target = Item.objects.create(
             media_id="Q19320959",
             source="wikidata",
-            media_type="theater",
+            media_type="stage",
             title="Hamilton",
             image="",
-            theater_forms=["musical"],
+            stage_forms=["musical"],
         )
-        Theater.objects.create(item=old, user=self.user, notes="My visit")
+        Stage.objects.create(item=old, user=self.user, notes="My visit")
 
         def source_response(url, params, **kwargs):
             if "commons.wikimedia.org" in url:
@@ -3706,22 +3731,20 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=source_response):
             response = self.client.get(
-                reverse(
-                    "media_details", args=["wikidata", "theater", "Q998", "hamilton"]
-                )
+                reverse("media_details", args=["wikidata", "stage", "Q998", "hamilton"])
             )
         self.assertContains(response, "Saved Photographer")
         target.refresh_from_db()
         self.assertEqual(target.image, "https://thumb.wikimedia.org/stage.jpg")
-        self.assertEqual(target.theater_artwork["work_id"], "Q19320959")
-        self.assertEqual(target.theater_artwork["evidence_work_id"], "Q998")
-        self.assertEqual(target.theater_artwork["work_revision"], 100)
+        self.assertEqual(target.stage_artwork["work_id"], "Q19320959")
+        self.assertEqual(target.stage_artwork["evidence_work_id"], "Q998")
+        self.assertEqual(target.stage_artwork["work_revision"], 100)
 
     def test_cached_search_resolves_newly_verified_aliases(self):
         """Cached duplicate results converge once another lookup verifies identity."""
         self.entities["Q998"] = {**self.entities["Q19320959"], "id": "Q998"}
         first = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            reverse("search"), {"media_type": "stage", "q": "Hamilton"}
         )
         self.assertEqual(len(first.context["data"]["results"]), 2)
         self.entities["Q998"] = {
@@ -3729,10 +3752,10 @@ class TheaterDiscoveryTests(TestCase):
             "redirects": {"from": "Q998", "to": "Q19320959"},
         }
         self.client.get(
-            reverse("media_details", args=["wikidata", "theater", "Q998", "hamilton"])
+            reverse("media_details", args=["wikidata", "stage", "Q998", "hamilton"])
         )
         second = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            reverse("search"), {"media_type": "stage", "q": "Hamilton"}
         )
         self.assertEqual(
             [entry["item"]["media_id"] for entry in second.context["data"]["results"]],
@@ -3744,35 +3767,35 @@ class TheaterDiscoveryTests(TestCase):
         old = Item.objects.create(
             media_id="Q998",
             source="wikidata",
-            media_type="theater",
+            media_type="stage",
             title="Old Hamilton",
             image="",
-            theater_forms=["musical"],
+            stage_forms=["musical"],
         )
         Item.objects.create(
             media_id="Q19320959",
             source="wikidata",
-            media_type="theater",
+            media_type="stage",
             title="Hamilton",
             image="",
-            theater_forms=["musical"],
+            stage_forms=["musical"],
         )
-        attendance = Theater.objects.create(
+        attendance = Stage.objects.create(
             item=old, user=self.user, notes="Keep my history"
         )
         unexpected = Movie.objects.create(item=old, user=self.user, status="Planning")
         response = self.client.get(
-            reverse("media_details", args=["wikidata", "theater", "Q998", "hamilton"])
+            reverse("media_details", args=["wikidata", "stage", "Q998", "hamilton"])
         )
         self.assertContains(response, "saved records were not changed", status_code=500)
         attendance.refresh_from_db()
         self.assertEqual(attendance.item_id, old.pk)
         self.assertTrue(Movie.objects.filter(pk=unexpected.pk).exists())
-        self.assertFalse(TheaterRedirect.objects.filter(alias_id="Q998").exists())
+        self.assertFalse(StageRedirect.objects.filter(alias_id="Q998").exists())
 
     def test_intermediate_redirect_returns_terminal_metadata_before_saving(self):
         """A provider's intermediate redirect cannot recreate a retired work ID."""
-        TheaterRedirect.objects.create(
+        StageRedirect.objects.create(
             alias_id="Q19320959", canonical_id="Q997", revision=100
         )
         self.entities["Q997"] = {
@@ -3783,14 +3806,14 @@ class TheaterDiscoveryTests(TestCase):
         old = Item.objects.create(
             media_id="Q998",
             source="wikidata",
-            media_type="theater",
+            media_type="stage",
             title="Saved Hamilton",
             image="",
-            theater_forms=["musical"],
+            stage_forms=["musical"],
         )
-        first = Theater.objects.create(item=old, user=self.user, notes="First visit")
+        first = Stage.objects.create(item=old, user=self.user, notes="First visit")
         details = self.client.get(
-            reverse("media_details", args=["wikidata", "theater", "Q998", "hamilton"])
+            reverse("media_details", args=["wikidata", "stage", "Q998", "hamilton"])
         )
         self.assertContains(details, "First visit")
         self.assertContains(details, "Canonical Hamilton")
@@ -3804,14 +3827,14 @@ class TheaterDiscoveryTests(TestCase):
             {
                 "media_id": "Q996",
                 "source": "wikidata",
-                "media_type": "theater",
+                "media_type": "stage",
                 "status": "Planning",
                 "notes": "Second visit",
             },
         )
         self.assertEqual(
             set(
-                Item.objects.filter(media_type="theater").values_list(
+                Item.objects.filter(media_type="stage").values_list(
                     "media_id", flat=True
                 )
             ),
@@ -3820,16 +3843,14 @@ class TheaterDiscoveryTests(TestCase):
         first.refresh_from_db()
         self.assertEqual(first.item.media_id, "Q997")
         self.assertEqual(
-            set(
-                Theater.objects.filter(item=first.item).values_list("notes", flat=True)
-            ),
+            set(Stage.objects.filter(item=first.item).values_list("notes", flat=True)),
             {"First visit", "Second visit"},
         )
         self.assertEqual(
-            TheaterRedirect.objects.get(alias_id="Q998").canonical_id, "Q19320959"
+            StageRedirect.objects.get(alias_id="Q998").canonical_id, "Q19320959"
         )
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            reverse("search"), {"media_type": "stage", "q": "Hamilton"}
         )
         self.assertEqual(
             [
@@ -3841,7 +3862,7 @@ class TheaterDiscoveryTests(TestCase):
 
     def test_intermediate_redirect_does_not_save_when_terminal_is_unavailable(self):
         """A failed canonical lookup must not save under an intermediate ID."""
-        TheaterRedirect.objects.create(
+        StageRedirect.objects.create(
             alias_id="Q19320959", canonical_id="Q997", revision=100
         )
 
@@ -3856,16 +3877,16 @@ class TheaterDiscoveryTests(TestCase):
                 {
                     "media_id": "Q998",
                     "source": "wikidata",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "status": "Planning",
                     "notes": "Do not save to intermediate",
                 },
             )
         self.assertEqual(response.status_code, 500)
-        self.assertFalse(Theater.objects.filter(user=self.user).exists())
-        self.assertFalse(Item.objects.filter(media_type="theater").exists())
+        self.assertFalse(Stage.objects.filter(user=self.user).exists())
+        self.assertFalse(Item.objects.filter(media_type="stage").exists())
         self.assertEqual(
-            TheaterRedirect.objects.get(alias_id="Q998").canonical_id, "Q19320959"
+            StageRedirect.objects.get(alias_id="Q998").canonical_id, "Q19320959"
         )
 
     def test_redirect_chain_retains_original_evidence_and_one_work(self):
@@ -3874,7 +3895,7 @@ class TheaterDiscoveryTests(TestCase):
             reverse("media_save"),
             {
                 "media_id": "Q998",
-                "media_type": "theater",
+                "media_type": "stage",
                 "source": "wikidata",
                 "status": "Completed",
                 "notes": "Original visit",
@@ -3888,16 +3909,16 @@ class TheaterDiscoveryTests(TestCase):
         self.search_ids = ["Q19320959", "Q997"]
         cache.clear()
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            reverse("search"), {"media_type": "stage", "q": "Hamilton"}
         )
         self.assertEqual(len(response.context["data"]["results"]), 1)
-        self.assertEqual(Theater.objects.get().item.media_id, "Q997")
+        self.assertEqual(Stage.objects.get().item.media_id, "Q997")
         response = self.client.get(
-            reverse("media_details", args=["wikidata", "theater", "Q998", "hamilton"])
+            reverse("media_details", args=["wikidata", "stage", "Q998", "hamilton"])
         )
         self.assertContains(response, "Original visit")
         self.assertEqual(
-            TheaterRedirect.objects.get(alias_id="Q998").canonical_id, "Q19320959"
+            StageRedirect.objects.get(alias_id="Q998").canonical_id, "Q19320959"
         )
         self.entities["Q998"] = {
             **self.entities["Q997"],
@@ -3906,24 +3927,24 @@ class TheaterDiscoveryTests(TestCase):
         self.search_ids = ["Q998", "Q19320959", "Q997"]
         cache.clear()
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            reverse("search"), {"media_type": "stage", "q": "Hamilton"}
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.context["data"]["results"]), 1)
         self.assertEqual(
-            TheaterRedirect.objects.get(alias_id="Q998").canonical_id, "Q19320959"
+            StageRedirect.objects.get(alias_id="Q998").canonical_id, "Q19320959"
         )
 
     def test_conflicting_saved_redirect_leaves_records_untouched(self):
         """Contradictory provider identity cannot silently reassign saved work."""
         self.client.get(
-            reverse("media_details", args=["wikidata", "theater", "Q998", "hamilton"])
+            reverse("media_details", args=["wikidata", "stage", "Q998", "hamilton"])
         )
         self.client.post(
             reverse("media_save"),
             {
                 "media_id": "Q19320959",
-                "media_type": "theater",
+                "media_type": "stage",
                 "source": "wikidata",
                 "status": "Completed",
                 "notes": "Keep this visit",
@@ -3936,11 +3957,11 @@ class TheaterDiscoveryTests(TestCase):
         }
         cache.clear()
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            reverse("search"), {"media_type": "stage", "q": "Hamilton"}
         )
-        self.assertContains(response, "Conflicting Theater identity", status_code=500)
-        self.assertEqual(Theater.objects.get().item.media_id, "Q19320959")
-        self.assertEqual(Theater.objects.get().notes, "Keep this visit")
+        self.assertContains(response, "Conflicting Stage identity", status_code=500)
+        self.assertEqual(Stage.objects.get().item.media_id, "Q19320959")
+        self.assertEqual(Stage.objects.get().notes, "Keep this visit")
 
     def test_work_linked_artwork_keeps_credit_through_tracking(self):
         """An eligible Commons image carries its source and license to the library."""
@@ -3993,39 +4014,42 @@ class TheaterDiscoveryTests(TestCase):
 
         with patch("app.providers.services.session.get", side_effect=http_response):
             search = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                reverse("search"), {"media_type": "stage", "q": "Hamilton"}
             )
             self.assertContains(search, image)
-            self.assertContains(search, "Example Photographer")
-            self.assertContains(search, "CC BY-SA 4.0")
+            self.assertNotContains(search, "Image credit")
+            self.assertNotContains(search, "Example Photographer")
+            self.assertContains(
+                search,
+                reverse(
+                    "media_details",
+                    args=["wikidata", "stage", "Q19320959", "hamilton"],
+                ),
+            )
             details = self.client.get(
                 reverse(
                     "media_details",
-                    args=["wikidata", "theater", "Q19320959", "hamilton"],
+                    args=["wikidata", "stage", "Q19320959", "hamilton"],
                 )
             )
             self.assertContains(details, "Example Photographer")
             self.assertContains(details, "CC BY-SA 4.0")
+            self.assertContains(details, source_url)
             self.client.get(
-                reverse("lists_modal", args=["wikidata", "theater", "Q19320959"])
+                reverse("lists_modal", args=["wikidata", "stage", "Q19320959"])
             )
             self.client.post(
                 reverse("media_save"),
                 {
                     "media_id": "Q19320959",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "source": "wikidata",
                     "status": "Completed",
                 },
             )
         work = Item.objects.get(media_id="Q19320959")
         self.assertEqual(work.image, image)
-        self.assertEqual(work.theater_artwork["source_url"], source_url)
-        library = self.client.get(
-            reverse("medialist", args=[self.user.username, "theater"])
-        )
-        self.assertContains(library, "Example Photographer")
-        self.assertContains(library, "CC BY-SA 4.0")
+        self.assertEqual(work.stage_artwork["source_url"], source_url)
         cache.clear()
 
         def commons_outage(url, params, **kwargs):
@@ -4037,19 +4061,22 @@ class TheaterDiscoveryTests(TestCase):
             details = self.client.get(
                 reverse(
                     "media_details",
-                    args=["wikidata", "theater", "Q19320959", "hamilton"],
+                    args=["wikidata", "stage", "Q19320959", "hamilton"],
                 )
             )
             self.assertContains(details, "Example Photographer")
         work.refresh_from_db()
         self.assertEqual(work.image, image)
-        self.assertEqual(work.theater_artwork["artist"], "Example Photographer")
+        self.assertEqual(work.stage_artwork["artist"], "Example Photographer")
         for layout in ("table", "grid"):
             response = self.client.get(
-                reverse("medialist", args=[self.user.username, "theater"]),
+                reverse("medialist", args=[self.user.username, "stage"]),
                 {"layout": layout},
             )
-            self.assertContains(response, "Example Photographer")
+            if layout == "table":
+                self.assertContains(response, "Example Photographer")
+            else:
+                self.assertNotContains(response, "Image credit")
         metadata = commons["query"]["pages"]["123"]["imageinfo"][0]["extmetadata"]
         for field, value in [
             ("Restrictions", "unresolved third-party copyright"),
@@ -4064,7 +4091,7 @@ class TheaterDiscoveryTests(TestCase):
                     "app.providers.services.session.get", side_effect=http_response
                 ):
                     response = self.client.get(
-                        reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                        reverse("search"), {"media_type": "stage", "q": "Hamilton"}
                     )
                 self.assertContains(response, "Hamilton")
                 self.assertNotContains(response, image)
@@ -4073,7 +4100,7 @@ class TheaterDiscoveryTests(TestCase):
     def test_source_described_poster_beats_misleading_filename(self):
         """Prefer an identified poster without changing its work or credit."""
         fixture = json.loads(
-            (Path(__file__).parents[1] / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parents[1] / "mock_data/stage_artwork.json").read_text()
         )
         self.entities["Q822850"] = fixture["work"]
         self.search_ids = ["Q822850"]
@@ -4157,16 +4184,17 @@ class TheaterDiscoveryTests(TestCase):
                     "app.providers.services.session.get", side_effect=source_response
                 ):
                     response = self.client.get(
-                        reverse("search"), {"media_type": "theater", "q": "Bernarda"}
+                        reverse("search"), {"media_type": "stage", "q": "Bernarda"}
                     )
                 selected = response.context["data"]["results"][0]["item"]
                 expected_info = expected_page["imageinfo"][0]
                 self.assertEqual(selected["image"], expected_info["url"])
                 self.assertContains(response, expected_info["url"])
-                self.assertContains(
-                    response, expected_info["extmetadata"]["Artist"]["value"]
+                self.assertEqual(
+                    selected["stage_artwork"]["artist"],
+                    expected_info["extmetadata"]["Artist"]["value"],
                 )
-                artwork = selected["theater_artwork"]
+                artwork = selected["stage_artwork"]
                 self.assertEqual(artwork["work_id"], "Q822850")
                 self.assertEqual(artwork["evidence"], "P18/P154")
                 self.assertEqual(artwork["source_url"], expected_info["descriptionurl"])
@@ -4176,28 +4204,26 @@ class TheaterDiscoveryTests(TestCase):
         item = Item.objects.create(
             media_id="Q19320959",
             source="wikidata",
-            media_type="theater",
+            media_type="stage",
             title="Hamilton",
             image="",
-            theater_forms=["musical"],
+            stage_forms=["musical"],
         )
-        attendance = Theater.objects.create(
-            item=item, user=self.user, status="Planning"
-        )
+        attendance = Stage.objects.create(item=item, user=self.user, status="Planning")
         self.client.post(
             reverse("media_save"),
             {
                 "instance_id": attendance.pk,
                 "media_id": item.media_id,
                 "source": "wikidata",
-                "media_type": "theater",
+                "media_type": "stage",
                 "status": "In progress",
             },
         )
         self.assertEqual(self.client.get(reverse("home")).status_code, 200)
         with patch("app.providers.services.session.get", side_effect=requests.Timeout):
             response = self.client.get(
-                reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                reverse("search"), {"media_type": "stage", "q": "Hamilton"}
             )
             self.assertEqual(response.status_code, 500)
             self.assertContains(response, "Wikidata", status_code=500)
@@ -4207,7 +4233,7 @@ class TheaterDiscoveryTests(TestCase):
                     "instance_id": attendance.pk,
                     "media_id": item.media_id,
                     "source": "wikidata",
-                    "media_type": "theater",
+                    "media_type": "stage",
                     "status": "Completed",
                     "venue": "Local Theatre",
                 },
@@ -4219,8 +4245,8 @@ class TheaterDiscoveryTests(TestCase):
                 reverse("create_entry"),
                 {
                     "title": "Uncataloged",
-                    "media_type": "theater",
-                    "theater_forms": ["other"],
+                    "media_type": "stage",
+                    "stage_forms": ["other"],
                     "status": "Completed",
                 },
             )
@@ -4244,7 +4270,7 @@ class TheaterDiscoveryTests(TestCase):
         }
         self.search_ids += ["Q997", "Q996"]
         response = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            reverse("search"), {"media_type": "stage", "q": "Hamilton"}
         )
         self.assertEqual(
             [work["item"]["media_id"] for work in response.context["data"]["results"]],
@@ -4255,7 +4281,7 @@ class TheaterDiscoveryTests(TestCase):
             reverse("media_save"),
             {
                 "media_id": "Q996",
-                "media_type": "theater",
+                "media_type": "stage",
                 "source": "wikidata",
                 "status": "Completed",
             },
@@ -4274,10 +4300,10 @@ class TheaterDiscoveryTests(TestCase):
             }
             self.search_ids.append(identifier)
         first = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Stage Work"}
+            reverse("search"), {"media_type": "stage", "q": "Stage Work"}
         )
         second = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Stage Work", "page": 2}
+            reverse("search"), {"media_type": "stage", "q": "Stage Work", "page": 2}
         )
         first_ids = [
             work["item"]["media_id"] for work in first.context["data"]["results"]
@@ -4296,7 +4322,7 @@ class TheaterDiscoveryTests(TestCase):
             reverse("media_save"),
             {
                 "media_id": "Q998",
-                "media_type": "theater",
+                "media_type": "stage",
                 "source": "wikidata",
                 "status": "Planning",
                 "venue": "Saved Venue",
@@ -4304,14 +4330,14 @@ class TheaterDiscoveryTests(TestCase):
         )
         self.entities["Q19320959"]["labels"] = {"en": {"value": "Hamilton Updated"}}
         response = self.client.post(
-            reverse("sync_metadata", args=["wikidata", "theater", "Q998"]),
+            reverse("sync_metadata", args=["wikidata", "stage", "Q998"]),
             {"next": "/"},
         )
         self.assertEqual(response.status_code, 302)
         self.assertEqual(Item.objects.get().title, "Hamilton Updated")
-        self.assertEqual(Theater.objects.get().venue, "Saved Venue")
+        self.assertEqual(Stage.objects.get().venue, "Saved Venue")
         modal = self.client.get(
-            reverse("track_modal", args=["wikidata", "theater", "Q998"]),
+            reverse("track_modal", args=["wikidata", "stage", "Q998"]),
             {"return_url": "/"},
         )
         self.assertContains(modal, "Saved Venue")
@@ -4330,10 +4356,10 @@ class TheaterDiscoveryTests(TestCase):
                 response.headers["Retry-After"] = "60"
                 with patch("app.providers.services.session.get", return_value=response):
                     result = self.client.get(
-                        reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+                        reverse("search"), {"media_type": "stage", "q": "Hamilton"}
                     )
                 self.assertContains(result, "Wikidata", status_code=500)
         recovered = self.client.get(
-            reverse("search"), {"media_type": "theater", "q": "Hamilton"}
+            reverse("search"), {"media_type": "stage", "q": "Hamilton"}
         )
         self.assertContains(recovered, "Lin-Manuel Miranda")

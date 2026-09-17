@@ -6,37 +6,37 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('app', '0065_historicaltheater_theater_and_more'),
+        ('app', '0065_historicalstage_stage_and_more'),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='historicaltheater',
+            model_name='historicalstage',
             name='location',
             field=models.CharField(blank=True, default='', max_length=255),
         ),
         migrations.AddField(
-            model_name='historicaltheater',
+            model_name='historicalstage',
             name='production',
             field=models.CharField(blank=True, default='', max_length=500),
         ),
         migrations.AddField(
-            model_name='historicaltheater',
+            model_name='historicalstage',
             name='venue',
             field=models.CharField(blank=True, default='', max_length=255),
         ),
         migrations.AddField(
-            model_name='theater',
+            model_name='stage',
             name='location',
             field=models.CharField(blank=True, default='', max_length=255),
         ),
         migrations.AddField(
-            model_name='theater',
+            model_name='stage',
             name='production',
             field=models.CharField(blank=True, default='', max_length=500),
         ),
         migrations.AddField(
-            model_name='theater',
+            model_name='stage',
             name='venue',
             field=models.CharField(blank=True, default='', max_length=255),
         ),

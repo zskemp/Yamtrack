@@ -251,7 +251,7 @@ def get_media_metadata(
         ),
         MediaTypes.COMIC.value: lambda: comicvine.comic(media_id),
         MediaTypes.BOARDGAME.value: lambda: bgg.boardgame(media_id),
-        MediaTypes.THEATER.value: lambda: wikidata.theater(media_id),
+        MediaTypes.STAGE.value: lambda: wikidata.stage(media_id),
     }
     return metadata_retrievers[media_type]()
 
@@ -277,6 +277,6 @@ def search(media_type, query, page, source=None):
         ),
         MediaTypes.COMIC.value: lambda: comicvine.search(query, page),
         MediaTypes.BOARDGAME.value: lambda: bgg.search(query, page),
-        MediaTypes.THEATER.value: lambda: wikidata.search(query, page),
+        MediaTypes.STAGE.value: lambda: wikidata.search(query, page),
     }
     return search_handlers[media_type]()

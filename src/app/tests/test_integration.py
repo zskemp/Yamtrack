@@ -13,7 +13,7 @@ from django.core.cache import cache
 from django.utils import timezone
 from playwright.sync_api import expect, sync_playwright
 
-from app.models import Item, Theater
+from app.models import Item, Stage
 from lists.models import CustomList
 
 
@@ -50,13 +50,13 @@ class IntegrationTest(StaticLiveServerTestCase):
         cls.browser.close()
         cls.playwright.stop()
 
-    def test_manual_theater_desktop_and_mobile(self):
+    def test_manual_stage_desktop_and_mobile(self):
         """Create and inspect an imageless hybrid work at both viewport sizes."""
         for width in (1280, 390):
             with self.subTest(width=width):
                 self.page.set_viewport_size({"width": width, "height": 900})
                 self.page.goto(f"{self.live_server_url}/create")
-                self.page.get_by_role("button", name="Theater", exact=True).click()
+                self.page.get_by_role("button", name="Stage", exact=True).click()
                 self.page.get_by_placeholder("Enter title").fill(f"Local Work {width}")
                 self.page.get_by_label("Play", exact=True).check()
                 self.page.get_by_label("Musical", exact=True).check()
@@ -66,7 +66,7 @@ class IntegrationTest(StaticLiveServerTestCase):
                 expect(self.page.locator("body")).to_contain_text(
                     f"Local Work {width} added successfully.",
                 )
-                self.page.goto(f"{self.live_server_url}/test/theater")
+                self.page.goto(f"{self.live_server_url}/test/stage")
                 self.page.get_by_title(f"Local Work {width}", exact=True).click()
                 expect(self.page.get_by_role("main")).to_contain_text("Play, Musical")
                 expect(self.page.get_by_role("main")).to_contain_text("First Theatre")
@@ -120,25 +120,25 @@ class IntegrationTest(StaticLiveServerTestCase):
         expect(self.page.locator(".htmx-settling")).to_have_count(0)
         control.click()
 
-    def test_theater_library_filter_and_custom_list(self):
+    def test_stage_library_filter_and_custom_list(self):
         """Organize manual works through existing library and list controls."""
         for title, status in [("Alpha Stage", "Completed"), ("Beta Stage", "Planning")]:
             item = Item.objects.create(
                 title=title,
                 media_id=Item.generate_manual_id(),
                 source="manual",
-                media_type="theater",
+                media_type="stage",
                 image=settings.IMG_NONE,
-                theater_forms=["play"],
+                stage_forms=["play"],
             )
-            Theater.objects.create(item=item, user=self.user, status=status)
+            Stage.objects.create(item=item, user=self.user, status=status)
         custom_list = CustomList.objects.create(name="Stage Library", owner=self.user)
         try:
             for width in (1280, 390):
                 with self.subTest(width=width):
                     self.page.set_viewport_size({"width": width, "height": 900})
                     self.page.goto(
-                        f"{self.live_server_url}/test/theater?status=All&layout=grid"
+                        f"{self.live_server_url}/test/stage?status=All&layout=grid"
                     )
                     self.page.get_by_role("button", name="All", exact=True).click()
                     self.page.get_by_role(
@@ -176,18 +176,18 @@ class IntegrationTest(StaticLiveServerTestCase):
         finally:
             self.page.set_viewport_size({"width": 1280, "height": 720})
 
-    def test_theater_export_upload_restores_separate_visits(self):
+    def test_stage_export_upload_restores_separate_visits(self):
         """The browser backup/upload flow restores two visits for the importing user."""
         item = Item.objects.create(
             title="Portable Stage Work",
             media_id=Item.generate_manual_id(),
             source="manual",
-            media_type="theater",
+            media_type="stage",
             image=settings.IMG_NONE,
-            theater_forms=["play", "musical"],
+            stage_forms=["play", "musical"],
         )
         for venue in ("First Theatre", "Second Theatre"):
-            Theater.objects.create(item=item, user=self.user, venue=venue, notes=venue)
+            Stage.objects.create(item=item, user=self.user, venue=venue, notes=venue)
         self.page.goto(f"{self.live_server_url}/settings/export")
         with self.page.expect_download() as download_info:
             self.page.get_by_role("button", name="Export as CSV", exact=True).click()
@@ -209,7 +209,7 @@ class IntegrationTest(StaticLiveServerTestCase):
                 self.page.goto(f"{self.live_server_url}/settings/import")
                 self.page.locator('input[name="yamtrack_csv"]').set_input_files(backup)
                 self.page.wait_for_load_state("networkidle")
-                self.page.goto(f"{self.live_server_url}/{username}/theater")
+                self.page.goto(f"{self.live_server_url}/{username}/stage")
                 self.page.get_by_title("Portable Stage Work", exact=True).click()
                 expect(self.page.get_by_role("main")).to_contain_text("First Theatre")
                 expect(self.page.get_by_role("main")).to_contain_text("Second Theatre")
@@ -222,10 +222,10 @@ class IntegrationTest(StaticLiveServerTestCase):
         finally:
             self.page.set_viewport_size({"width": 1280, "height": 720})
 
-    def test_theater_wikipedia_poster_search_to_library(self):
+    def test_stage_wikipedia_poster_search_to_library(self):
         """Display exact-article posters and non-free credits on both sizes."""
         fixture = json.loads(
-            (Path(__file__).parent / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parent / "mock_data/stage_artwork.json").read_text()
         )
         work = {
             **fixture["work"],
@@ -272,13 +272,16 @@ class IntegrationTest(StaticLiveServerTestCase):
                 for visit, width in enumerate((1280, 390)):
                     self.page.set_viewport_size({"width": width, "height": 900})
                     self.page.goto(
-                        f"{self.live_server_url}/search?media_type=theater&q=Hamilton"
+                        f"{self.live_server_url}/search?media_type=stage&q=Hamilton"
                     )
                     picture = self.page.get_by_role("img", name="Hamilton", exact=True)
                     expect(picture).to_have_attribute("src", image_url)
                     expect(picture).to_have_js_property("naturalWidth", 1)
                     expect(picture).to_have_css("object-fit", "contain")
-                    self.page.get_by_text("Image credit", exact=True).click()
+                    expect(
+                        self.page.get_by_text("Image credit", exact=True)
+                    ).to_have_count(0)
+                    self.page.get_by_title("Hamilton", exact=True).click()
                     expect(
                         self.page.get_by_text(
                             "Non-free copyrighted artwork.", exact=False
@@ -294,7 +297,6 @@ class IntegrationTest(StaticLiveServerTestCase):
                             "document.documentElement.scrollWidth <= innerWidth"
                         )
                     )
-                    self.page.get_by_title("Hamilton", exact=True).click()
                     if visit == 0:
                         self.page.get_by_role(
                             "button", name="Add to tracker", exact=True
@@ -303,7 +305,7 @@ class IntegrationTest(StaticLiveServerTestCase):
                             "Local Theatre"
                         )
                         self.page.get_by_role("button", name="Add", exact=True).click()
-                    self.page.goto(f"{self.live_server_url}/test/theater")
+                    self.page.goto(f"{self.live_server_url}/test/stage")
                     expect(
                         self.page.get_by_role("img", name="Hamilton", exact=True)
                     ).to_have_attribute("src", image_url)
@@ -312,10 +314,10 @@ class IntegrationTest(StaticLiveServerTestCase):
             self.page.set_viewport_size({"width": 1280, "height": 720})
             cache.clear()
 
-    def test_theater_search_artwork_and_tracking(self):
+    def test_stage_search_artwork_and_tracking(self):
         """Provider search and saved artwork retain readable credits on both sizes."""
         fixture = json.loads(
-            (Path(__file__).parent / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parent / "mock_data/stage_artwork.json").read_text()
         )
         poster = fixture["poster"]
         fixture["work"]["claims"]["P18"] = [
@@ -342,7 +344,7 @@ class IntegrationTest(StaticLiveServerTestCase):
                     with self.subTest(width=width):
                         self.page.set_viewport_size({"width": width, "height": 900})
                         self.page.goto(
-                            f"{self.live_server_url}/search?media_type=theater&q=Bernarda"
+                            f"{self.live_server_url}/search?media_type=stage&q=Bernarda"
                         )
                         picture = self.page.get_by_role(
                             "img", name="The House of Bernarda Alba", exact=True
@@ -351,13 +353,15 @@ class IntegrationTest(StaticLiveServerTestCase):
                         expect(picture).to_have_attribute("src", image_url)
                         expect(picture).to_have_js_property("naturalWidth", 1)
                         expect(picture).to_have_css("object-fit", "contain")
-                        self.page.get_by_text("Image credit", exact=True).click()
                         expect(
-                            self.page.get_by_text("Poster Artist", exact=False)
-                        ).to_be_visible()
+                            self.page.get_by_text("Image credit", exact=True)
+                        ).to_have_count(0)
                         self.page.get_by_title(
                             "The House of Bernarda Alba", exact=True
                         ).click()
+                        expect(
+                            self.page.get_by_text("Poster Artist", exact=False)
+                        ).to_be_visible()
                         if width == desktop_width:
                             self.page.get_by_role(
                                 "button", name="Add to tracker", exact=True
@@ -371,8 +375,13 @@ class IntegrationTest(StaticLiveServerTestCase):
                         expect(self.page.get_by_role("main")).to_contain_text(
                             "Local Theatre"
                         )
-                        self.page.goto(f"{self.live_server_url}/test/theater")
-                        self.page.get_by_text("Image credit", exact=True).click()
+                        self.page.goto(f"{self.live_server_url}/test/stage")
+                        expect(
+                            self.page.get_by_text("Image credit", exact=True)
+                        ).to_have_count(0)
+                        self.page.get_by_title(
+                            "The House of Bernarda Alba", exact=True
+                        ).click()
                         expect(
                             self.page.get_by_role(
                                 "link", name="CC BY-SA 4.0", exact=True
@@ -384,13 +393,13 @@ class IntegrationTest(StaticLiveServerTestCase):
                                 " <= window.innerWidth"
                             )
                         )
-            self._assert_failed_theater_image_keeps_frame(image_url)
+            self._assert_failed_stage_image_keeps_frame(image_url)
         finally:
             self.page.unroute(image_url)
             self.page.set_viewport_size({"width": 1280, "height": 720})
             cache.clear()
 
-    def _assert_failed_theater_image_keeps_frame(self, image_url):
+    def _assert_failed_stage_image_keeps_frame(self, image_url):
         """Verify an unavailable image leaves the saved card's frame stable."""
         picture = self.page.get_by_role(
             "img", name="The House of Bernarda Alba", exact=True
@@ -421,10 +430,10 @@ class IntegrationTest(StaticLiveServerTestCase):
         response._content = json.dumps(payload).encode()
         return response
 
-    def test_theater_direct_image_search_to_library(self):
+    def test_stage_direct_image_search_to_library(self):
         """Direct-file images and credits remain usable at both viewport sizes."""
         fixture = json.loads(
-            (Path(__file__).parent / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parent / "mock_data/stage_artwork.json").read_text()
         )
         fixture["work"]["claims"].update(
             {
@@ -488,7 +497,7 @@ class IntegrationTest(StaticLiveServerTestCase):
                 for visit, width in enumerate((1280, 390)):
                     self.page.set_viewport_size({"width": width, "height": 900})
                     self.page.goto(
-                        f"{self.live_server_url}/search?media_type=theater&q=Bernarda"
+                        f"{self.live_server_url}/search?media_type=stage&q=Bernarda"
                     )
                     picture = self.page.get_by_role(
                         "img", name="The House of Bernarda Alba", exact=True
@@ -515,8 +524,13 @@ class IntegrationTest(StaticLiveServerTestCase):
                                 "button", name="Add", exact=True
                             ).click()
                         self.assertTrue(saved.value.ok)
-                    self.page.goto(f"{self.live_server_url}/test/theater")
-                    self.page.get_by_text("Image credit", exact=True).click()
+                    self.page.goto(f"{self.live_server_url}/test/stage")
+                    expect(
+                        self.page.get_by_text("Image credit", exact=True)
+                    ).to_have_count(0)
+                    self.page.get_by_title(
+                        "The House of Bernarda Alba", exact=True
+                    ).click()
                     expect(
                         self.page.get_by_role("link", name="Public domain", exact=True)
                     ).to_be_visible()
@@ -538,7 +552,7 @@ class IntegrationTest(StaticLiveServerTestCase):
             self.page.set_viewport_size({"width": 1280, "height": 720})
             cache.clear()
 
-    def test_theater_specific_subtype_fallback_search_to_tracking(self):
+    def test_stage_specific_subtype_fallback_search_to_tracking(self):
         """Subtype-only works can be found by title and tracked on both layouts."""
         work = {
             "id": "Q98001",
@@ -610,7 +624,7 @@ class IntegrationTest(StaticLiveServerTestCase):
                 for visit, width in enumerate((1280, 390)):
                     self.page.set_viewport_size({"width": width, "height": 900})
                     self.page.goto(
-                        f"{self.live_server_url}/search?media_type=theater&q=Regional"
+                        f"{self.live_server_url}/search?media_type=stage&q=Regional"
                     )
                     expect(
                         self.page.get_by_title("Regional Play", exact=True)
@@ -624,7 +638,7 @@ class IntegrationTest(StaticLiveServerTestCase):
                         self.page.get_by_label("Venue", exact=True).fill("Local Stage")
                         self.page.get_by_role("button", name="Add", exact=True).click()
                     expect(self.page.get_by_role("main")).to_contain_text("Local Stage")
-                    self.page.goto(f"{self.live_server_url}/test/theater")
+                    self.page.goto(f"{self.live_server_url}/test/stage")
                     expect(
                         self.page.get_by_title("Regional Opera", exact=True)
                     ).to_have_count(1)
@@ -632,21 +646,21 @@ class IntegrationTest(StaticLiveServerTestCase):
             self.page.set_viewport_size({"width": 1280, "height": 720})
             cache.clear()
 
-    def test_theater_redirect_keeps_saved_attendance_visible(self):
+    def test_stage_redirect_keeps_saved_attendance_visible(self):
         """Duplicate provider IDs resolve to one card without losing a saved visit."""
         fixture = json.loads(
-            (Path(__file__).parent / "mock_data/theater_artwork.json").read_text()
+            (Path(__file__).parent / "mock_data/stage_artwork.json").read_text()
         )
         fixture["work"]["claims"].pop("P18")
         old = Item.objects.create(
             media_id="Q998",
             source="wikidata",
-            media_type="theater",
+            media_type="stage",
             title="Old work label",
             image=settings.IMG_NONE,
-            theater_forms=["play"],
+            stage_forms=["play"],
         )
-        Theater.objects.create(item=old, user=self.user, notes="My saved visit")
+        Stage.objects.create(item=old, user=self.user, notes="My saved visit")
 
         def source_response(url, params, **_kwargs):
             if "commons.wikimedia.org" in url:
@@ -678,7 +692,7 @@ class IntegrationTest(StaticLiveServerTestCase):
                 for width in (1280, 390):
                     self.page.set_viewport_size({"width": width, "height": 900})
                     self.page.goto(
-                        f"{self.live_server_url}/search?media_type=theater&q=Bernarda"
+                        f"{self.live_server_url}/search?media_type=stage&q=Bernarda"
                     )
                     card = self.page.get_by_title(
                         "The House of Bernarda Alba", exact=True
@@ -688,7 +702,7 @@ class IntegrationTest(StaticLiveServerTestCase):
                     expect(self.page.get_by_role("main")).to_contain_text(
                         "My saved visit"
                     )
-                    self.page.goto(f"{self.live_server_url}/test/theater")
+                    self.page.goto(f"{self.live_server_url}/test/stage")
                     expect(
                         self.page.get_by_title("Old work label", exact=True)
                     ).to_have_count(1)
