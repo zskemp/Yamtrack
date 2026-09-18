@@ -96,7 +96,7 @@ class StageRedirectConcurrencyTests(TransactionTestCase):
         fixture["work"]["claims"].pop("P18")
 
         def source_response(url, **_kwargs):
-            if "commons.wikimedia.org" in url:
+            if url == "https://commons.wikimedia.org/w/api.php":
                 payload = {"query": {"search": []}}
             else:
                 barrier.wait(timeout=15)

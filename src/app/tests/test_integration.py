@@ -145,7 +145,7 @@ class IntegrationTest(StaticLiveServerTestCase):
                         ]
                     }
                 }
-            elif "commons.wikimedia.org" in url:
+            elif url == "https://commons.wikimedia.org/w/api.php":
                 payload = {"query": {"search": []}}
             elif params["action"] == "query":
                 payload = {"query": {"search": [{"title": "Q19320959"}]}}
@@ -316,7 +316,7 @@ class IntegrationTest(StaticLiveServerTestCase):
     def _poster_source_response(self, fixture, url, params):
         """Serve work-linked photo and poster metadata without discovery."""
         poster = fixture["poster"]
-        if "commons.wikimedia.org" in url:
+        if url == "https://commons.wikimedia.org/w/api.php":
             self.assertNotIn("list", params)
             self.assertEqual(params["action"], "query")
             if "Work poster.png" in params.get("titles", ""):

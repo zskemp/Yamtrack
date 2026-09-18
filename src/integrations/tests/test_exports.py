@@ -176,7 +176,7 @@ class StageExportRestoreTest(TestCase):
             response.status_code = 200
             payload = (
                 fixture["commons"]
-                if "commons.wikimedia.org" in url
+                if url == "https://commons.wikimedia.org/w/api.php"
                 else {"entities": {"Q822850": fixture["work"]}}
             )
             response._content = json.dumps(payload).encode()
