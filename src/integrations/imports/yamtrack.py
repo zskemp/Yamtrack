@@ -13,7 +13,7 @@ from django.utils.dateparse import parse_datetime
 import app
 from app import config, stage
 from app.models import MediaTypes, Sources
-from app.providers import commons, services, wikipedia
+from app.providers import commons, services
 from app.templatetags import app_tags
 from integrations.imports import helpers
 from integrations.imports.helpers import MediaImportError, MediaImportUnexpectedError
@@ -228,17 +228,12 @@ class YamtrackImporter:
         return {"stage_forms": work_forms, "stage_artwork": artwork}
 
     def _stage_artwork(self, row):
-        """Never restore a provider image while dropping its required credit."""
+        """Restore current source credits without loading development formats."""
         if row["source"] != Sources.WIKIDATA.value:
             return {}
         try:
             record = json.loads(row.get("stage_artwork") or "{}")
-            restore = (
-                wikipedia.restored_artwork
-                if isinstance(record, dict) and record.get("provider") == "wikipedia"
-                else commons.restored_artwork
-            )
-            artwork = restore(
+            artwork = commons.restored_artwork(
                 record,
                 row["media_id"],
                 row["image"],

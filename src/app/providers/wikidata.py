@@ -436,21 +436,18 @@ def hydrate(work_entities):
     ]
 
 
-def illustrate(work, *, article_artwork=None):
+def illustrate(work, artwork, *, unavailable=False):
     """Attach image and credit together after work selection and pagination."""
     work = work.copy()
-    work["artwork_direct_missing"] = not work.get("artwork_candidates")
-    artwork = article_artwork or commons.artwork(
-        work.pop("artwork_work_id", work["media_id"]),
-        work.pop("artwork_candidates", []),
-        work.get("work_revision"),
-        work["stage_forms"],
+    work["artwork_unavailable"] = (
+        artwork is None
+        or unavailable
+        or bool(artwork and artwork.get("lookup_incomplete"))
     )
-    article_incomplete = wikipedia.incomplete(article_artwork)
-    work["artwork_unavailable"] = artwork is None or article_incomplete
-    work["artwork_partial"] = article_incomplete or (
-        bool(artwork) and not artwork.get("selection_complete", True)
-    )
+    if artwork:
+        artwork = {
+            key: value for key, value in artwork.items() if key != "lookup_incomplete"
+        }
     work["wikipedia_version"] = wikipedia.VERSION
     if artwork and artwork["work_id"] != work["media_id"]:
         artwork = stage_identity.retarget_artwork(artwork, work["media_id"])
@@ -458,7 +455,7 @@ def illustrate(work, *, article_artwork=None):
         image=(artwork or {}).get("image", settings.IMG_NONE),
         stage_artwork=artwork or {},
     )
-    work["artwork_policy"] = commons.POLICY_VERSION
+    work["artwork_policy"] = commons.SCHEMA
     return work
 
 
@@ -471,7 +468,7 @@ def stage(media_id):
     cached = cache.get(key)
     if (
         cached is not None
-        and cached.get("artwork_policy") == commons.POLICY_VERSION
+        and cached.get("artwork_policy") == commons.SCHEMA
         and cached.get("classification_version") == CLASSIFICATION_VERSION
         and cached.get("label_version") == LABEL_VERSION
         and cached.get("wikipedia_version") == wikipedia.VERSION
@@ -488,13 +485,8 @@ def stage(media_id):
     if terminal_id != entity["id"]:
         return stage(terminal_id)
     work = hydrate([entity])[0]
-    article_artwork = wikipedia.artworks([work])[work["media_id"]]
-    with commons.request_budget():
-        result = illustrate(work, article_artwork=article_artwork)
-    if not any(
-        result.get(key)
-        for key in ("artwork_unavailable", "artwork_partial", "labels_incomplete")
-    ):
+    result = illustrate_page([work], wikipedia.artworks([work]))[0]
+    if not any(result.get(key) for key in ("artwork_unavailable", "labels_incomplete")):
         cache.set(f"wikidata_stage_{result['media_id']}", result, 3600)
     return result
 
@@ -604,18 +596,17 @@ def search(query, page):
     return response
 
 
-@commons.request_budget(
-    request_limit=commons.PAGE_REQUEST_LIMIT, time_limit=commons.PAGE_TIME_LIMIT
-)
 def illustrate_page(displayed, article_artworks):
-    """Prioritize article images while retaining the separate Commons page budget."""
-    with commons.batch_files(
+    """Use Wikipedia first and one batched direct-file Commons fallback."""
+    fallback = commons.artworks(
         [work for work in displayed if not article_artworks[work["media_id"]]]
-    ):
-        return [
-            illustrate(
-                work,
-                article_artwork=article_artworks[work["media_id"]],
-            )
-            for work in displayed
-        ]
+    )
+    return [
+        illustrate(
+            work,
+            article_artworks[work["media_id"]]
+            or fallback.get(work.get("artwork_work_id", work["media_id"])),
+            unavailable=article_artworks[work["media_id"]] is None,
+        )
+        for work in displayed
+    ]

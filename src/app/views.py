@@ -326,11 +326,6 @@ def media_details(request, source, media_type, media_id, title):  # noqa: ARG001
 
     if current_instance is not None:
         helpers.preserve_stage_artwork(media_metadata, current_instance.item)
-        if media_metadata.get("artwork_unavailable"):
-            media_metadata.update(
-                image=current_instance.item.image,
-                stage_artwork=current_instance.item.stage_artwork,
-            )
         helpers.refresh_item_artwork(
             current_instance.item,
             media_metadata.get("image"),
@@ -481,7 +476,7 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
         logger.error(msg)
     else:
         deleted = cache.delete(cache_key)
-        cache.delete(f"commons_stage_v{commons.POLICY_VERSION}_{media_id}")
+        cache.delete(commons.cache_key(media_id))
         wikipedia.invalidate(source, media_type, media_id)
         logger.debug("%s - Old cache deleted: %s", cache_key, deleted)
 

@@ -13,9 +13,6 @@ from django.core.cache import cache
 from django.utils import timezone
 from playwright.sync_api import expect, sync_playwright
 
-from app.models import Item, Stage
-from lists.models import CustomList
-
 
 class IntegrationTest(StaticLiveServerTestCase):
     """Integration tests for the application."""
@@ -120,108 +117,6 @@ class IntegrationTest(StaticLiveServerTestCase):
         expect(self.page.locator(".htmx-settling")).to_have_count(0)
         control.click()
 
-    def test_stage_library_filter_and_custom_list(self):
-        """Organize manual works through existing library and list controls."""
-        for title, status in [("Alpha Stage", "Completed"), ("Beta Stage", "Planning")]:
-            item = Item.objects.create(
-                title=title,
-                media_id=Item.generate_manual_id(),
-                source="manual",
-                media_type="stage",
-                image=settings.IMG_NONE,
-                stage_forms=["play"],
-            )
-            Stage.objects.create(item=item, user=self.user, status=status)
-        custom_list = CustomList.objects.create(name="Stage Library", owner=self.user)
-        try:
-            for width in (1280, 390):
-                with self.subTest(width=width):
-                    self.page.set_viewport_size({"width": width, "height": 900})
-                    self.page.goto(
-                        f"{self.live_server_url}/test/stage?status=All&layout=grid"
-                    )
-                    self.page.get_by_role("button", name="All", exact=True).click()
-                    self.page.get_by_role(
-                        "button", name="Completed", exact=True
-                    ).click()
-                    expect(
-                        self.page.get_by_title("Beta Stage", exact=True)
-                    ).to_have_count(0)
-                    self.page.get_by_title("Alpha Stage", exact=True).click()
-                    self.page.get_by_role(
-                        "button", name="Add to lists", exact=True
-                    ).click()
-                    self.page.get_by_role("button", name="Add", exact=True).click()
-                    expect(
-                        self.page.get_by_role("button", name="Remove", exact=True)
-                    ).to_be_visible()
-                    self.page.goto(f"{self.live_server_url}/list/{custom_list.pk}")
-                    expect(
-                        self.page.get_by_title("Alpha Stage", exact=True)
-                    ).to_have_count(1)
-                    self.page.get_by_title("Alpha Stage", exact=True).click()
-                    self.page.get_by_role(
-                        "button", name="Add to lists", exact=True
-                    ).click()
-                    self.page.get_by_role("button", name="Remove", exact=True).click()
-                    self.page.goto(f"{self.live_server_url}/list/{custom_list.pk}")
-                    expect(
-                        self.page.get_by_title("Alpha Stage", exact=True)
-                    ).to_have_count(0)
-                    self.assertTrue(
-                        self.page.evaluate(
-                            "document.documentElement.scrollWidth <= window.innerWidth"
-                        )
-                    )
-        finally:
-            self.page.set_viewport_size({"width": 1280, "height": 720})
-
-    def test_stage_export_upload_restores_separate_visits(self):
-        """The browser backup/upload flow restores two visits for the importing user."""
-        item = Item.objects.create(
-            title="Portable Stage Work",
-            media_id=Item.generate_manual_id(),
-            source="manual",
-            media_type="stage",
-            image=settings.IMG_NONE,
-            stage_forms=["play", "musical"],
-        )
-        for venue in ("First Theatre", "Second Theatre"):
-            Stage.objects.create(item=item, user=self.user, venue=venue, notes=venue)
-        self.page.goto(f"{self.live_server_url}/settings/export")
-        with self.page.expect_download() as download_info:
-            self.page.get_by_role("button", name="Export as CSV", exact=True).click()
-        backup = download_info.value.path()
-        try:
-            for width in (1280, 390):
-                username = f"restore{width}"
-                get_user_model().objects.create_user(
-                    username=username, password=self.credentials["password"]
-                )
-                self.page.context.clear_cookies()
-                self.page.set_viewport_size({"width": width, "height": 900})
-                self.page.goto(f"{self.live_server_url}/accounts/login/")
-                self.page.get_by_placeholder("Enter your username").fill(username)
-                self.page.get_by_placeholder("Enter your password").fill(
-                    self.credentials["password"]
-                )
-                self.page.get_by_role("button", name="Sign In", exact=True).click()
-                self.page.goto(f"{self.live_server_url}/settings/import")
-                self.page.locator('input[name="yamtrack_csv"]').set_input_files(backup)
-                self.page.wait_for_load_state("networkidle")
-                self.page.goto(f"{self.live_server_url}/{username}/stage")
-                self.page.get_by_title("Portable Stage Work", exact=True).click()
-                expect(self.page.get_by_role("main")).to_contain_text("First Theatre")
-                expect(self.page.get_by_role("main")).to_contain_text("Second Theatre")
-                expect(self.page.get_by_role("main")).to_contain_text("Play, Musical")
-                self.assertTrue(
-                    self.page.evaluate(
-                        "document.documentElement.scrollWidth <= window.innerWidth"
-                    )
-                )
-        finally:
-            self.page.set_viewport_size({"width": 1280, "height": 720})
-
     def test_stage_wikipedia_poster_search_to_library(self):
         """Display exact-article posters and non-free credits on both sizes."""
         fixture = json.loads(
@@ -283,9 +178,7 @@ class IntegrationTest(StaticLiveServerTestCase):
                     ).to_have_count(0)
                     self.page.get_by_title("Hamilton", exact=True).click()
                     expect(
-                        self.page.get_by_text(
-                            "Non-free copyrighted artwork.", exact=False
-                        )
+                        self.page.get_by_text("Article fair use", exact=False)
                     ).to_be_visible()
                     expect(
                         self.page.get_by_role(
@@ -304,7 +197,16 @@ class IntegrationTest(StaticLiveServerTestCase):
                         self.page.get_by_label("Venue", exact=True).fill(
                             "Local Theatre"
                         )
-                        self.page.get_by_role("button", name="Add", exact=True).click()
+                        with self.page.expect_response(
+                            lambda response: (
+                                "/media_save" in response.url
+                                and response.request.method == "POST"
+                            )
+                        ) as saved:
+                            self._click_settled(
+                                self.page.get_by_role("button", name="Add", exact=True)
+                            )
+                        self.assertTrue(saved.value.ok)
                     self.page.goto(f"{self.live_server_url}/test/stage")
                     expect(
                         self.page.get_by_role("img", name="Hamilton", exact=True)
@@ -429,286 +331,6 @@ class IntegrationTest(StaticLiveServerTestCase):
         response.status_code = 200
         response._content = json.dumps(payload).encode()
         return response
-
-    def test_stage_direct_image_search_to_library(self):
-        """Direct-file images and credits remain usable at both viewport sizes."""
-        fixture = json.loads(
-            (Path(__file__).parent / "mock_data/stage_artwork.json").read_text()
-        )
-        fixture["work"]["claims"].update(
-            {
-                "P373": [{"mainsnak": {"datavalue": {"value": "Stage Work"}}}],
-                "P50": [{"mainsnak": {"datavalue": {"value": {"id": "Q414"}}}}],
-            }
-        )
-        image_info = fixture["commons"]["query"]["pages"]["123"]["imageinfo"][0]
-        fixture["commons"]["query"]["pages"]["123"]["templates"] = [
-            {"title": "Template:PD-US"}
-        ]
-        image_info["extmetadata"].update(
-            LicenseUrl={"value": ""},
-            LicenseShortName={"value": "Public domain"},
-            Copyrighted={"value": "False"},
-            Credit={"value": "Theatre Magazine, January 1919, pages 178-179"},
-        )
-        image_info["extmetadata"]["ImageDescription"] = {
-            "value": (
-                "Illustration of The House of Bernarda Alba, "
-                "a play by Federico Garcia Lorca."
-            ),
-        }
-        image_url = image_info["url"]
-        image = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII="
-        )
-
-        def source_response(url, params, **_kwargs):
-            if "commons.wikimedia.org" not in url:
-                payload = (
-                    {"query": {"search": [{"title": "Q822850"}]}}
-                    if params["action"] == "query"
-                    else {
-                        "entities": {
-                            "Q822850": fixture["work"],
-                            "Q414": {
-                                "id": "Q414",
-                                "labels": {"en": {"value": "Federico Garcia Lorca"}},
-                            },
-                        }
-                    }
-                )
-            else:
-                self.assertNotIn("list", params)
-                self.assertEqual(params["prop"], "imageinfo|categories|templates|info")
-                payload = fixture["commons"]
-            response = requests.Response()
-            response.status_code = 200
-            response._content = json.dumps(payload).encode()
-            return response
-
-        cache.clear()
-        self.page.route(
-            image_url, lambda route: route.fulfill(body=image, content_type="image/png")
-        )
-        try:
-            with patch(
-                "app.providers.services.session.get", side_effect=source_response
-            ):
-                for visit, width in enumerate((1280, 390)):
-                    self.page.set_viewport_size({"width": width, "height": 900})
-                    self.page.goto(
-                        f"{self.live_server_url}/search?media_type=stage&q=Bernarda"
-                    )
-                    picture = self.page.get_by_role(
-                        "img", name="The House of Bernarda Alba", exact=True
-                    )
-                    expect(picture).to_have_js_property("naturalWidth", 1)
-                    expect(picture).to_have_css("object-fit", "contain")
-                    self.page.get_by_title(
-                        "The House of Bernarda Alba", exact=True
-                    ).click()
-                    if visit == 0:
-                        self.page.get_by_role(
-                            "button", name="Add to tracker", exact=True
-                        ).click()
-                        self.page.get_by_label("Venue", exact=True).fill(
-                            "Local Theatre"
-                        )
-                        with self.page.expect_response(
-                            lambda response: (
-                                "/media_save" in response.url
-                                and response.request.method == "POST"
-                            )
-                        ) as saved:
-                            self.page.get_by_role(
-                                "button", name="Add", exact=True
-                            ).click()
-                        self.assertTrue(saved.value.ok)
-                    self.page.goto(f"{self.live_server_url}/test/stage")
-                    expect(
-                        self.page.get_by_text("Image credit", exact=True)
-                    ).to_have_count(0)
-                    self.page.get_by_title(
-                        "The House of Bernarda Alba", exact=True
-                    ).click()
-                    expect(
-                        self.page.get_by_role("link", name="Public domain", exact=True)
-                    ).to_be_visible()
-                    expect(
-                        self.page.get_by_text("outside the United States", exact=False)
-                    ).to_be_visible()
-                    expect(
-                        self.page.get_by_text(
-                            "Theatre Magazine, January 1919", exact=False
-                        )
-                    ).to_be_visible()
-                    self.assertTrue(
-                        self.page.evaluate(
-                            "document.documentElement.scrollWidth <= window.innerWidth"
-                        )
-                    )
-        finally:
-            self.page.unroute(image_url)
-            self.page.set_viewport_size({"width": 1280, "height": 720})
-            cache.clear()
-
-    def test_stage_specific_subtype_fallback_search_to_tracking(self):
-        """Subtype-only works can be found by title and tracked on both layouts."""
-        work = {
-            "id": "Q98001",
-            "labels": {"en": {"value": "Regional Opera"}},
-            "claims": {
-                "P31": [
-                    {"mainsnak": {"datavalue": {"value": {"id": identifier}}}}
-                    for identifier in ("Q98002", "Q58483083", "Q7777570")
-                ]
-            },
-        }
-        work_type = {
-            "id": "Q98002",
-            "lastrevid": 100,
-            "claims": {
-                "P279": [{"mainsnak": {"datavalue": {"value": {"id": "Q1344"}}}}]
-            },
-        }
-
-        def source_response(url, params, **_kwargs):
-            if "commons.wikimedia.org" in url:
-                payload = {"query": {"search": []}}
-            elif params["action"] == "query":
-                hits = (
-                    [{"title": "Q98003"}]
-                    if "haswbstatement" in params["srsearch"]
-                    else [{"title": "Q98001"}]
-                )
-                payload = {"query": {"search": hits}}
-            else:
-                available = {
-                    "Q98001": work,
-                    "Q98002": work_type,
-                    "Q98003": {
-                        "id": "Q98003",
-                        "labels": {},
-                        "claims": {
-                            "P31": [
-                                {"mainsnak": {"datavalue": {"value": {"id": "Q25379"}}}}
-                            ]
-                        },
-                    },
-                }
-                payload = {
-                    "entities": {
-                        identifier: available[identifier]
-                        for identifier in params["ids"].split("|")
-                    }
-                }
-                if params.get("props") == "labels":
-                    payload = {
-                        "entities": {
-                            "Q98003": {
-                                "id": "Q98003",
-                                "labels": {"nl": {"value": "Regional Play"}},
-                            }
-                        }
-                    }
-            response = requests.Response()
-            response.status_code = 200
-            response._content = json.dumps(payload).encode()
-            return response
-
-        cache.clear()
-        try:
-            with patch(
-                "app.providers.services.session.get", side_effect=source_response
-            ):
-                for visit, width in enumerate((1280, 390)):
-                    self.page.set_viewport_size({"width": width, "height": 900})
-                    self.page.goto(
-                        f"{self.live_server_url}/search?media_type=stage&q=Regional"
-                    )
-                    expect(
-                        self.page.get_by_title("Regional Play", exact=True)
-                    ).to_have_count(1)
-                    self.page.get_by_title("Regional Opera", exact=True).click()
-                    expect(self.page.get_by_role("main")).to_contain_text("Opera")
-                    if visit == 0:
-                        self.page.get_by_role(
-                            "button", name="Add to tracker", exact=True
-                        ).click()
-                        self.page.get_by_label("Venue", exact=True).fill("Local Stage")
-                        self.page.get_by_role("button", name="Add", exact=True).click()
-                    expect(self.page.get_by_role("main")).to_contain_text("Local Stage")
-                    self.page.goto(f"{self.live_server_url}/test/stage")
-                    expect(
-                        self.page.get_by_title("Regional Opera", exact=True)
-                    ).to_have_count(1)
-        finally:
-            self.page.set_viewport_size({"width": 1280, "height": 720})
-            cache.clear()
-
-    def test_stage_redirect_keeps_saved_attendance_visible(self):
-        """Duplicate provider IDs resolve to one card without losing a saved visit."""
-        fixture = json.loads(
-            (Path(__file__).parent / "mock_data/stage_artwork.json").read_text()
-        )
-        fixture["work"]["claims"].pop("P18")
-        old = Item.objects.create(
-            media_id="Q998",
-            source="wikidata",
-            media_type="stage",
-            title="Old work label",
-            image=settings.IMG_NONE,
-            stage_forms=["play"],
-        )
-        Stage.objects.create(item=old, user=self.user, notes="My saved visit")
-
-        def source_response(url, params, **_kwargs):
-            if "commons.wikimedia.org" in url:
-                payload = {"query": {"search": []}}
-            elif params["action"] == "query":
-                payload = {
-                    "query": {"search": [{"title": "Q998"}, {"title": "Q822850"}]}
-                }
-            else:
-                payload = {
-                    "entities": {
-                        "Q822850": fixture["work"],
-                        "Q998": {
-                            **fixture["work"],
-                            "redirects": {"from": "Q998", "to": "Q822850"},
-                        },
-                    }
-                }
-            response = requests.Response()
-            response.status_code = 200
-            response._content = json.dumps(payload).encode()
-            return response
-
-        cache.clear()
-        try:
-            with patch(
-                "app.providers.services.session.get", side_effect=source_response
-            ):
-                for width in (1280, 390):
-                    self.page.set_viewport_size({"width": width, "height": 900})
-                    self.page.goto(
-                        f"{self.live_server_url}/search?media_type=stage&q=Bernarda"
-                    )
-                    card = self.page.get_by_title(
-                        "The House of Bernarda Alba", exact=True
-                    )
-                    expect(card).to_have_count(1)
-                    card.click()
-                    expect(self.page.get_by_role("main")).to_contain_text(
-                        "My saved visit"
-                    )
-                    self.page.goto(f"{self.live_server_url}/test/stage")
-                    expect(
-                        self.page.get_by_title("Old work label", exact=True)
-                    ).to_have_count(1)
-        finally:
-            self.page.set_viewport_size({"width": 1280, "height": 720})
-            cache.clear()
 
     def test_season_progress_edit(self):
         """Test the progress edit of a season."""

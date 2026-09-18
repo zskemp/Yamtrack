@@ -191,15 +191,10 @@ def preserve_stage_artwork(metadata, item=None):
     if item is None or item.media_type != MediaTypes.STAGE.value:
         return
     saved = item.stage_artwork
-    fresh = metadata.get("stage_artwork", {})
-    if saved and (
-        metadata.get("artwork_unavailable")
-        or (not fresh and metadata.get("artwork_direct_missing"))
-        or (
-            isinstance(saved.get("evidence"), str)
-            and saved["evidence"] in {"P180", "P373/description"}
-            and fresh.get("provider") != "wikipedia"
-        )
+    if (
+        saved
+        and saved.get("schema") == metadata.get("artwork_policy")
+        and metadata.get("artwork_unavailable")
     ):
         metadata.update(image=item.image, stage_artwork=saved)
 

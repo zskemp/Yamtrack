@@ -1,20 +1,9 @@
-"""Work-linked Commons artwork with explicit reuse metadata."""
+"""Direct Commons thumbnails and source-reported credits for Stage works."""
 
-import logging
-import re
-import unicodedata
-from contextlib import contextmanager
-from contextvars import ContextVar
-from copy import deepcopy
-from dataclasses import dataclass
 from html import unescape
-from html.parser import HTMLParser
-from time import monotonic
 from urllib.parse import urlsplit
 
 import requests
-from bs4 import BeautifulSoup
-from django.conf import settings
 from django.core.cache import cache
 from django.utils import timezone
 from django.utils.html import strip_tags
@@ -22,1008 +11,212 @@ from django.utils.html import strip_tags
 from app.models import Sources
 from app.providers import services
 
-logger = logging.getLogger(__name__)
 BASE_URL = "https://commons.wikimedia.org/w/api.php"
-POLICY_VERSION = 12
-LEGACY_POLICY_VERSION = 3
-PD_ART_NOTICE_POLICY_VERSION = 8
-MIN_IMAGE_DIMENSION = 200
-NON_POSTER_RANK = 2
-FILE_NAMESPACE = 6
-MIN_CREATOR_WORDS = 2
-ARTWORK_REQUEST_LIMIT = 24
-ARTWORK_TIME_LIMIT = 20
-ARTWORK_HTTP_TIMEOUT = 8
-PAGE_REQUEST_LIMIT = 48
-PAGE_TIME_LIMIT = 30
-BATCH_RECOVERY_REQUESTS = 8
-_request_budget = ContextVar("commons_request_budget", default=None)
-_page_files = ContextVar("commons_page_files", default=None)
-
-
-class ArtworkUnavailableError(Exception):
-    """Transient provider failure, distinct from a rejected asset."""
-
-
-@dataclass
-class ArtworkBudget:
-    """Share enrichment effort across every work in a request."""
-
-    deadline: float
-    remaining: int = ARTWORK_REQUEST_LIMIT
-
-    def reserve(self):
-        """Reserve one HTTP call with a timeout bounded by the remaining time."""
-        remaining_time = self.deadline - monotonic()
-        if self.remaining <= 0 or remaining_time <= 0:
-            raise ArtworkUnavailableError
-        self.remaining -= 1
-        return min(remaining_time, ARTWORK_HTTP_TIMEOUT, settings.REQUEST_TIMEOUT)
-
-
-@contextmanager
-def request_budget(
-    *, request_limit=ARTWORK_REQUEST_LIMIT, time_limit=ARTWORK_TIME_LIMIT
-):
-    """Scope an artwork budget to a page without leaking across users/threads."""
-    token = _request_budget.set(ArtworkBudget(monotonic() + time_limit, request_limit))
-    try:
-        yield
-    finally:
-        _request_budget.reset(token)
-
-
-LICENSES = {
-    "/publicdomain/zero/1.0/": ("CC0 1.0", "Cc-zero"),
-    "/licenses/by/2.0/": ("CC BY 2.0", "Cc-by-2.0"),
-    "/licenses/by/4.0/": ("CC BY 4.0", "Cc-by-4.0"),
-    "/licenses/by-sa/3.0/": ("CC BY-SA 3.0", "Cc-by-sa-3.0"),
-    "/licenses/by-sa/4.0/": ("CC BY-SA 4.0", "Cc-by-sa-4.0"),
-}
-WARNING_PATTERNS = (
-    "copyright violation",
-    "copyright violations",
-    "copyvio",
-    "deletion",
-    "no permission",
-    "no source",
-    "no license",
-    "no author",
-    "missing permission",
-    "missing source",
-    "missing author",
-    "missing license",
-    "permission pending",
-    "permission received",
-    "disputed",
-    "license review needed",
-    "license review failed",
-    "unreviewed",
-    "pd old auto: no death date",
-    "pd-old-auto without death date",
-)
-PUBLIC_DOMAIN_BASES = {
-    "pd-us-dust-jacket": (
-        "Commons identifies this book jacket as public domain in the United "
-        "States because it was published without the required copyright notice. "
-        "This is not a grant for the book text or other jurisdictions."
-    ),
-    "pd-textlogo": (
-        "Simple text/logo below the copyright originality threshold; "
-        "trademark rights may still apply."
-    ),
-    "pd-old-auto-expired": (
-        "Commons identifies expired copyright in the source country and the "
-        "United States; other jurisdictions may differ."
-    ),
-    "pd-old-100-expired": (
-        "Commons identifies an author deceased over 100 years ago and "
-        "expired United States copyright."
-    ),
-    "pd-old-70-expired": (
-        "Commons identifies an author deceased over 70 years ago and expired "
-        "United States copyright; longer terms may apply elsewhere."
-    ),
-    "pd-us": (
-        "Commons identifies this US work as public domain in the United States. "
-        "The general PD-US tag does not specify whether expiration, lack of notice "
-        "or lack of renewal is the reason. It may remain copyrighted outside the "
-        "United States, especially where the rule of the shorter term does not "
-        "apply. Retain the supplied creator and publication-source information. "
-        "https://commons.wikimedia.org/wiki/Template:PD-US"
-    ),
-}
-STANDARD_RESTRICTIONS = {
-    "personality",
-    "personality rights",
-    "trademark",
-    "trademarked",
-    "costume",
+SCHEMA = "stage-artwork-1"
+IMAGE_HOSTS = {"upload.wikimedia.org", "thumb.wikimedia.org"}
+SOURCE_HOSTS = {"commons.wikimedia.org"} | {
+    f"{language}.wikipedia.org" for language in ("en", "fr", "de", "es", "it", "nl")
 }
 
 
-class CreditText(HTMLParser):
-    """Preserve notice links as printable URLs without accepting executable HTML."""
-
-    def __init__(self, source_base="https://commons.wikimedia.org"):
-        """Initialize plain text and nested link buffers."""
-        super().__init__(convert_charrefs=True)
-        self.parts = []
-        self.links = []
-        self.source_base = source_base
-
-    def handle_starttag(self, tag, attrs):
-        """Retain safe notice links and block boundaries."""
-        if tag == "a":
-            target = dict(attrs).get("href", "")
-            if target.startswith("//"):
-                target = "https:" + target
-            if target.startswith("/"):
-                target = self.source_base + target
-            try:
-                parsed = urlsplit(target)
-                valid = (
-                    parsed.scheme in {"http", "https"}
-                    and parsed.hostname
-                    and not parsed.username
-                )
-            except ValueError:
-                valid = False
-            self.links.append(target if valid else "")
-        elif tag in {"br", "p", "div", "li"}:
-            self.parts.append(" ")
-
-    def handle_endtag(self, tag):
-        """Append the referenced URL after its credited label."""
-        if tag == "a" and self.links:
-            target = self.links.pop()
-            if target:
-                self.parts.append(f" ({target})")
-
-    def handle_data(self, data):
-        """Keep notice text for escaped template rendering."""
-        self.parts.append(data)
-
-
-def credit_text(value, *, source_base="https://commons.wikimedia.org"):
-    """Convert credited HTML to escaped text while retaining supplied URLs."""
-    if not isinstance(value, str):
-        return str(value) if isinstance(value, (int, float, bool)) else ""
-    parser = CreditText(source_base)
-    parser.feed(value)
-    return "".join(parser.parts).strip()
-
-
-def safe_url(value, host):
-    """Accept only the expected HTTPS source without credentials or custom ports."""
+def safe_url(value, hosts):
+    """Allow HTTPS URLs on expected hosts without embedded credentials."""
     if not isinstance(value, str):
         return False
     try:
         parsed = urlsplit(value)
     except ValueError:
         return False
-    return parsed.scheme == "https" and parsed.netloc == host and not parsed.fragment
+    if isinstance(hosts, str):
+        hosts = {hosts}
+    return parsed.scheme == "https" and parsed.netloc in hosts and not parsed.fragment
 
 
-def text(value):
-    """Keep provider attribution as plain text, never executable markup."""
-    return unescape(strip_tags(value)).strip()
+def credit_text(value):
+    """Keep source text escaped by templates, never render provider HTML."""
+    return unescape(strip_tags(value)).strip() if isinstance(value, str) else ""
 
 
-def reuse_grant(value, tags):
-    """Use explicit source grants or named public-domain bases, not availability."""
-    if value.get("Copyrighted", "").casefold() == "false":
-        for template, notice in PUBLIC_DOMAIN_BASES.items():
-            if f"template:{template}" in tags:
-                if template == "pd-us" and (
-                    not value.get("Artist", "").strip()
-                    or value["Artist"].strip().casefold()
-                    in {"unknown", "unknown author", "anonymous"}
-                    or not re.search(
-                        r"\b(?:1[5-9][0-9]{2}|20[0-9]{2})\b", value.get("Credit", "")
-                    )
-                ):
-                    continue
-                return {
-                    "license": "Public domain",
-                    "license_url": f"https://commons.wikimedia.org/wiki/Template:{template}",
-                    "basis": template,
-                    "basis_notice": notice,
-                }
-    license_url = value.get("LicenseUrl", "").replace("http://", "https://", 1)
-    parsed = urlsplit(
-        license_url if safe_url(license_url, "creativecommons.org") else ""
-    )
-    license_path = parsed.path.rstrip("/") + "/"
-    license_entry = LICENSES.get(license_path)
-    if not license_entry or parsed.query:
-        return None
-    license_name, template = license_entry
-    if not any(
-        tag == f"template:{template.casefold()}"
-        or tag.startswith(f"template:{template.casefold()}-migrated")
-        for tag in tags
-    ):
-        return None
-    if not value.get("Artist") or value["Artist"].casefold() in {
-        "unknown",
-        "unknown author",
-        "anonymous",
-    }:
-        return None
-    return {
-        "license": license_name,
-        "license_url": "https://creativecommons.org" + license_path,
-        "basis": "",
-        "basis_notice": "",
-    }
-
-
-def reuse_notices(value, tags):
-    """Keep standard notices; unknown substantive restrictions require review."""
-    restrictions = {
-        entry.strip().casefold()
-        for entry in value.get("Restrictions", "").split("|")
-        if entry.strip()
-    }
-    if restrictions - STANDARD_RESTRICTIONS:
-        return None
-    for template, restriction in [
-        ("personality rights", "personality"),
-        ("trademarked", "trademark"),
-        ("costume", "costume"),
-    ]:
-        if f"template:{template}" in tags:
-            restrictions.add(restriction)
-    notices = []
-    if restrictions:
-        notices.append(
-            "Source notices: "
-            + ", ".join(sorted(restrictions))
-            + ". Copyright permission does not grant endorsement, personality, "
-            "trademark or separate design rights. See the source file for "
-            "use-specific restrictions."
-        )
-    if any("migrated-with-disclaimers" in tag for tag in tags):
-        if not value.get("LicenseNotices"):
-            return None
-        notices.append(value["LicenseNotices"])
-    if "template:pd-art" in tags:
-        notices.append(
-            "Commons PD-Art assessment covers a faithful reproduction of "
-            "two-dimensional public-domain art; reproduction rights can differ "
-            "by jurisdiction. https://commons.wikimedia.org/wiki/Commons:Reuse_of_PD-Art_photographs"
-        )
-    return " ".join(notices)
-
-
-def license_notices(page, license_name):
-    """Capture file-specific migrated-license notices from the rendered grant."""
-    response = request_data(
-        {
-            "action": "parse",
-            "pageid": page["pageid"],
-            "prop": "text",
-            "disablelimitreport": 1,
-        }
-    )
-    parsed = response.get("parse", {})
-    if parsed.get("revid") and page.get("lastrevid") != parsed["revid"]:
-        return ""
-    soup = BeautifulSoup(parsed.get("text", {}).get("*", ""), "html.parser")
-    for block in soup.select(".licensetpl"):
-        name = block.select_one(".licensetpl_short")
-        if name and name.get_text(strip=True) == license_name:
-            return credit_text(str(block))
-    return ""
-
-
-def qualified_image(page):
-    """Reject incomplete rights information and known warning categories/templates."""
+def from_file(page, work_id, *, source_host, article_url=""):
+    """Read a thumbnail and credits without interpreting its reuse conditions."""
     info = next(iter(page.get("imageinfo", [])), {})
+    image = info.get("thumburl", "")
+    source = info.get("descriptionurl", "")
     metadata = info.get("extmetadata", {})
-    value = {
-        key: credit_text(field.get("value", "")) for key, field in metadata.items()
+    rights = {
+        key: credit_text(value.get("value", ""))
+        for key, value in metadata.items()
+        if isinstance(value, dict)
     }
     if (
-        "badfile" in info
-        or value.get("DeletionReason")
-        or value.get("NonFree", "").lower() in {"true", "1", "yes"}
+        not safe_url(image, IMAGE_HOSTS)
+        or not safe_url(source, source_host)
+        or info.get("mime") not in {"image/jpeg", "image/png", "image/webp"}
+        or "badfile" in info
+        or rights.get("DeletionReason")
     ):
-        return None
-    tags = [
-        entry["title"].casefold().replace("_", " ")
-        for kind in ("categories", "templates")
-        for entry in page.get(kind, [])
-    ]
-    if any(pattern in tag for tag in tags for pattern in WARNING_PATTERNS):
-        return None
-    grant = reuse_grant(value, tags)
-    if grant and any("migrated-with-disclaimers" in tag for tag in tags):
-        value["LicenseNotices"] = license_notices(page, grant["license"])
-    notices = reuse_notices(value, tags)
-    if grant is None or notices is None:
-        return None
-    artist = value.get("Artist", "")
-    image_url = info.get("thumburl") or info.get("url", "")
-    source_url = info.get("descriptionurl", "")
-    width, height = info.get("width", 0), info.get("height", 0)
-    if (
-        not any(
-            safe_url(image_url, host)
-            for host in ("upload.wikimedia.org", "thumb.wikimedia.org")
-        )
-        or not safe_url(source_url, "commons.wikimedia.org")
-        or min(width, height) < MIN_IMAGE_DIMENSION
-        or info.get("mime")
-        not in {
-            "image/jpeg",
-            "image/png",
-            "image/webp",
-        }
-    ):
-        return None
+        return {}
+    license_url = rights.get("LicenseUrl", "")
     return {
-        "image": image_url,
-        "source_url": source_url,
-        "title": value.get("ObjectName") or page["title"].removeprefix("File:"),
-        "description": text(metadata.get("ImageDescription", {}).get("value", "")),
-        "artist": artist,
-        "credit": value.get("Credit", ""),
-        "attribution": value.get("Attribution", ""),
-        "permission": value.get("Permission", ""),
-        **grant,
-        "notices": notices,
-        "page_id": page["pageid"],
-        "revision": page.get("lastrevid"),
-        "sha1": info.get("sha1", ""),
-        "timestamp": info.get("timestamp", ""),
+        "schema": SCHEMA,
+        "work_id": work_id,
+        "image": image,
+        "source_url": source,
+        "article_url": article_url,
+        "title": credit_text(page.get("title", "")).removeprefix("File:")
+        or "Source image",
+        "artist": rights.get("Artist", ""),
+        "credit": rights.get("Credit", ""),
+        "attribution": rights.get("Attribution", ""),
+        "permission": rights.get("Permission", ""),
+        "license": rights.get("LicenseShortName") or "Source information",
+        "license_url": license_url
+        if safe_url(license_url, SOURCE_HOSTS | {"creativecommons.org"})
+        else source,
+        "notices": " ".join(
+            rights.get(key, "")
+            for key in ("UsageTerms", "Restrictions", "LicenseNotices")
+        ).strip(),
         "retrieved_at": timezone.now().isoformat(),
-        "width": width,
-        "height": height,
-        "rights": value,
-        "source_tags": tags,
-        "policy": POLICY_VERSION,
-    }
-
-
-def require_available(metadata):
-    """Prevent explicit metadata sync from persisting a failed artwork lookup."""
-    if metadata.get("artwork_unavailable"):
-        raise services.ProviderAPIError(
-            Sources.WIKIDATA.value,
-            ArtworkUnavailableError(),
-            "Artwork provider unavailable. Please retry sync later",
-        )
-
-
-def upgrade_reproduction_notice(artwork):
-    """Reconstruct new caveats only after checking the exact legacy notice."""
-    if (
-        artwork.get("policy") not in {4, 5, 6, 7}
-        or not isinstance(artwork.get("rights"), dict)
-        or not all(isinstance(value, str) for value in artwork["rights"].values())
-        or not isinstance(artwork.get("source_tags"), list)
-        or not all(isinstance(tag, str) for tag in artwork["source_tags"])
-        or "template:pd-art" not in artwork["source_tags"]
-    ):
-        return artwork
-    previous_tags = [tag for tag in artwork["source_tags"] if tag != "template:pd-art"]
-    if artwork.get("notices") != reuse_notices(artwork["rights"], previous_tags):
-        return artwork
-    return {
-        **artwork,
-        "notices": reuse_notices(artwork["rights"], artwork["source_tags"]),
-        "policy": PD_ART_NOTICE_POLICY_VERSION,
     }
 
 
 def restored_artwork(artwork, work_id, image):
-    """Validate portable credits without needing a live provider lookup."""
-    if not isinstance(artwork, dict):
+    """Accept only the current export shape; credits are not authenticated proof."""
+    if not isinstance(artwork, dict) or artwork.get("schema") != SCHEMA:
         return {}
-    artwork = upgrade_reproduction_notice(artwork)
-    required = (
-        "image",
-        "source_url",
-        "title",
-        "license",
-        "license_url",
-        "work_id",
-    )
-    if any(
-        not isinstance(artwork.get(key), str) or not artwork[key] for key in required
-    ):
-        return {}
-    if artwork["work_id"] != work_id or artwork["image"] != image:
-        return {}
-    if not complete_credit(artwork):
-        return {}
-    valid_licenses = {
-        "https://creativecommons.org" + path: name
-        for path, (name, _template) in LICENSES.items()
-    }
-    invalid_legacy = artwork.get("policy") == LEGACY_POLICY_VERSION and (
-        not artwork.get("artist")
-        or valid_licenses.get(artwork["license_url"]) != artwork["license"]
-    )
-    valid_licenses.update(
-        {
-            f"https://commons.wikimedia.org/wiki/Template:{basis}": "Public domain"
-            for basis in PUBLIC_DOMAIN_BASES
-        }
-    )
     if (
-        invalid_legacy
-        or valid_licenses.get(artwork["license_url"]) != artwork["license"]
-        or not safe_url(artwork["source_url"], "commons.wikimedia.org")
-        or not any(
-            safe_url(image, host)
-            for host in ("upload.wikimedia.org", "thumb.wikimedia.org")
+        not all(isinstance(value, str) for value in artwork.values())
+        or artwork.get("work_id") != work_id
+        or artwork.get("image") != image
+        or not artwork.get("title", "").strip()
+        or not artwork.get("license", "").strip()
+        or not safe_url(image, IMAGE_HOSTS)
+        or not safe_url(artwork.get("source_url"), SOURCE_HOSTS)
+        or not safe_url(
+            artwork.get("license_url"), SOURCE_HOSTS | {"creativecommons.org"}
+        )
+        or (
+            artwork.get("article_url")
+            and not safe_url(artwork["article_url"], SOURCE_HOSTS)
         )
     ):
         return {}
-    result = artwork.copy()
-    for key in ("title", "artist", "credit", "attribution", "permission"):
-        result[key] = (
-            text(artwork.get(key, "")) if isinstance(artwork.get(key, ""), str) else ""
+    return artwork.copy()
+
+
+def cache_key(work_id):
+    """Keep development cache entries outside the first-release format."""
+    return f"commons_{SCHEMA}_{work_id}"
+
+
+def artworks(works):
+    """Fetch up to five direct filenames per work in batches of fifty, once."""
+    result, pending = {}, {}
+    for work in works:
+        identifier = work.get("artwork_work_id", work["media_id"])
+        filenames = list(dict.fromkeys(work.get("artwork_candidates", [])))[:5]
+        signature = [work.get("work_revision"), filenames]
+        cached = cache.get(cache_key(identifier))
+        if cached is not None and cached.get("signature") == signature:
+            result[identifier] = cached["artwork"]
+        elif filenames:
+            pending[identifier] = (signature, filenames)
+        else:
+            result[identifier] = {}
+    filenames = list(
+        dict.fromkeys(
+            filename
+            for _signature, candidates in pending.values()
+            for filename in candidates
         )
+    )
+    files = {}
+    for offset in range(0, len(filenames), 50):
+        files.update(fetch_files(filenames[offset : offset + 50]))
+    for identifier, (signature, candidates) in pending.items():
+        selected = select_file(files, candidates, identifier)
+        result[identifier] = selected
+        if selected is not None:
+            cache.set(
+                cache_key(identifier),
+                {"signature": signature, "artwork": selected},
+                3600,
+            )
     return result
 
 
-def complete_credit(artwork):
-    """Require the complete exported rights record, not just a license label."""
-    rights = artwork.get("rights")
-    if not isinstance(rights, dict) or artwork.get("policy") not in {
-        3,
-        4,
-        5,
-        6,
-        7,
-        8,
-        9,
-        10,
-        11,
-        POLICY_VERSION,
-    }:
-        return False
-    if artwork.get("policy") != LEGACY_POLICY_VERSION and any(
-        not isinstance(artwork.get(key), str)
-        for key in ("notices", "basis", "basis_notice")
-    ):
-        return False
-    if artwork.get("policy") != LEGACY_POLICY_VERSION and not consistent_reuse_record(
-        artwork
-    ):
-        return False
-    if artwork.get("evidence") == "P373/description" and not complete_category_evidence(
-        artwork
-    ):
-        return False
-    fields = {
-        "artist": "Artist",
-        "credit": "Credit",
-        "attribution": "Attribution",
-        "permission": "Permission",
-    }
-    return all(
-        key in artwork
-        and isinstance(artwork[key], str)
-        and artwork[key] == rights.get(source, "")
-        for key, source in fields.items()
-    ) and all(
-        key in artwork
-        for key in (
-            "page_id",
-            "revision",
-            "sha1",
-            "retrieved_at",
-            "evidence",
-            "work_revision",
-        )
-    )
+def select_file(files, candidates, identifier):
+    """Use the first usable direct candidate without ranking or extra requests."""
+    unavailable = False
+    for filename in candidates:
+        page = files.get(filename)
+        if page is None:
+            unavailable = True
+            continue
+        try:
+            selected = from_file(page, identifier, source_host="commons.wikimedia.org")
+        except (TypeError, ValueError, AttributeError, IndexError):
+            unavailable = True
+            continue
+        if selected:
+            return selected
+    return None if unavailable else {}
 
 
-def consistent_reuse_record(artwork):
-    """Keep notices and public-domain bases consistent with exported evidence."""
-    tags = artwork.get("source_tags")
-    rights = artwork.get("rights")
-    if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
-        return False
-    if not all(isinstance(value, str) for value in rights.values()):
-        return False
-    other_bases = {
-        f"template:{basis}"
-        for basis in PUBLIC_DOMAIN_BASES
-        if basis != artwork.get("basis")
-    }
-    grant = reuse_grant(rights, [tag for tag in tags if tag not in other_bases])
-    return (
-        grant is not None
-        and all(artwork.get(key) == value for key, value in grant.items())
-        and artwork.get("notices") == reuse_notices(rights, tags)
-        and not any(pattern in tag for tag in tags for pattern in WARNING_PATTERNS)
-    )
-
-
-def request_data(params):
-    """Use existing transport while respecting Wikimedia back-pressure."""
+def fetch_files(filenames):
+    """Resolve filename aliases from the same response; do not retry failed batches."""
     if cache.get("commons_retry_after"):
-        raise ArtworkUnavailableError
-    budget = _request_budget.get()
-    timeout = (
-        budget.reserve()
-        if budget
-        else min(ARTWORK_HTTP_TIMEOUT, settings.REQUEST_TIMEOUT)
-    )
+        return dict.fromkeys(filenames)
     try:
         response = services.api_request(
             Sources.WIKIDATA.value,
             "GET",
             BASE_URL,
-            params={"format": "json", **params},
+            params={
+                "action": "query",
+                "format": "json",
+                "redirects": 1,
+                "titles": "|".join(f"File:{filename}" for filename in filenames),
+                "prop": "imageinfo",
+                "iiprop": "url|mime|extmetadata|badfile",
+                "iilimit": 1,
+                "iiurlwidth": 300,
+                "iiextmetadatalanguage": "en",
+            },
             headers={"User-Agent": "Yamtrack (https://github.com/FuzzyGrim/Yamtrack)"},
-            timeout=timeout,
+            timeout=8,
         )
+        query = response["query"]
+        pages = {page["title"]: page for page in query["pages"].values()}
+        aliases = {
+            entry["from"]: entry["to"]
+            for field in ("normalized", "redirects")
+            for entry in query.get(field, [])
+        }
+        result = {}
+        for filename in filenames:
+            title, seen = f"File:{filename}", set()
+            while title in aliases and title not in seen:
+                seen.add(title)
+                title = aliases[title]
+            result[filename] = None if title in seen else pages.get(title)
     except requests.RequestException as error:
         response = getattr(error, "response", None)
         if response is not None and response.status_code in {429, 503}:
-            retry_after = response.headers.get("Retry-After", "60")
-            cache.set(
-                "commons_retry_after",
-                "limited",
-                max(5, min(int(retry_after), 86400)) if retry_after.isdigit() else 60,
-            )
-        logger.warning("Commons artwork request failed")
-        raise ArtworkUnavailableError from error
-    if not isinstance(response, dict):
-        raise ArtworkUnavailableError
-    if "error" in response:
-        cache.set("commons_retry_after", "limited", 60)
-        raise ArtworkUnavailableError
-    return response
-
-
-def merge_file_metadata(merged, response):
-    """Reject malformed fragments before merging rights-bearing file metadata."""
-    query = response.get("query")
-    pages = query.get("pages") if isinstance(query, dict) else None
-    if not isinstance(pages, dict) or not pages:
-        raise ArtworkUnavailableError
-    if merged and set(pages) != set(merged):
-        raise ArtworkUnavailableError
-    for page_id, page in pages.items():
-        if not isinstance(page, dict):
-            raise ArtworkUnavailableError
-        previous = merged.setdefault(page_id, {})
-        if previous and "missing" in page:
-            raise ArtworkUnavailableError
-        if "missing" not in page and (
-            (response.get("continue") and not isinstance(page.get("lastrevid"), int))
-            or (previous and previous.get("lastrevid") != page.get("lastrevid"))
-        ):
-            raise ArtworkUnavailableError
-        for key, value in page.items():
-            if key in {"templates", "categories"}:
-                if not isinstance(value, list):
-                    raise ArtworkUnavailableError
-                previous.setdefault(key, []).extend(value)
-            else:
-                previous[key] = value
-
-
-def file_metadata(filenames):
-    """Read a complete small file batch and its source-provided title aliases."""
-    params = {
-        "action": "query",
-        "redirects": 1,
-        "titles": "|".join(f"File:{filename}" for filename in filenames),
-        "prop": "imageinfo|categories|templates|info",
-        "cllimit": 500,
-        "tllimit": 500,
-        "iiprop": "url|size|mime|timestamp|sha1|extmetadata|badfile",
-        "iilimit": 1,
-        "iiurlwidth": 300,
-        "iiextmetadatalanguage": "en",
-    }
-    merged, continuation, aliases = {}, {}, {}
-    for _page in range(2):
-        response = request_data({**params, **continuation})
-        if "continue" in response and not isinstance(response["continue"], dict):
-            raise ArtworkUnavailableError
-        merge_file_metadata(merged, response)
-        for field in ("normalized", "redirects"):
-            entries = response["query"].get(field, [])
-            if not isinstance(entries, list):
-                raise ArtworkUnavailableError
-            for entry in entries:
-                if not isinstance(entry, dict) or not all(
-                    isinstance(entry.get(key), str) for key in ("from", "to")
-                ):
-                    raise ArtworkUnavailableError
-                aliases[entry["from"]] = entry["to"]
-        continuation = {
-            key: value
-            for key, value in response.get("continue", {}).items()
-            if key in {"clcontinue", "tlcontinue"}
-        }
-        if not continuation:
-            break
-        continuation["continue"] = "||"
-    if continuation:
-        raise ArtworkUnavailableError
-    return list(merged.values()), aliases
-
-
-class PageFiles:
-    """Resolve shared metadata lazily while keeping per-work selection isolated."""
-
-    def __init__(self, filenames):
-        """Keep file metadata private to one search page."""
-        self.pending = list(dict.fromkeys(filenames))
-        self.pages = {}
-        self.unavailable = set()
-
-    def fetch(self, filenames):
-        """Associate complete metadata through API-provided title mappings."""
-        pages, aliases = file_metadata(filenames)
-        if any(not isinstance(page.get("title"), str) for page in pages):
-            raise ArtworkUnavailableError
-        by_title = {page.get("title"): page for page in pages}
-        resolved = {}
-        for filename in filenames:
-            title = f"File:{filename}"
-            visited = set()
-            while title in aliases and title not in visited:
-                visited.add(title)
-                title = aliases[title]
-            if title in visited or title not in by_title:
-                raise ArtworkUnavailableError
-            resolved[filename] = by_title[title]
-        self.pages.update(resolved)
-
-    def load(self, filenames):
-        """Split a failed batch once, unless the source requests back-pressure."""
-        try:
-            self.fetch(filenames)
-        except ArtworkUnavailableError:
-            if len(filenames) == 1 or cache.get("commons_retry_after"):
-                self.unavailable.update(filenames)
-                return
-            for filename in filenames:
-                self.load([filename])
-
-    def read(self, filenames):
-        """Prioritize requested files and avoid speculative batches near limits."""
-        incomplete = False
-        for filename in filenames:
-            if filename not in self.pages and filename not in self.unavailable:
-                budget = _request_budget.get()
-                can_batch = budget is None or (
-                    budget.remaining >= BATCH_RECOVERY_REQUESTS
-                    and budget.deadline - monotonic() >= 2 * ARTWORK_HTTP_TIMEOUT
-                )
-                batch = [filename]
-                if can_batch:
-                    batch.extend(
-                        pending for pending in self.pending if pending != filename
-                    )
-                    batch = batch[:3]
-                self.pending = [
-                    pending for pending in self.pending if pending not in batch
-                ]
-                self.load(batch)
-            if filename in self.unavailable:
-                incomplete = True
-                continue
-            yield deepcopy(self.pages[filename])
-        if incomplete:
-            raise ArtworkUnavailableError
-
-
-@contextmanager
-def batch_files(works):
-    """Group only uncached direct files needed by this result page."""
-    pending = []
-    for work in works:
-        identifier = work.get("artwork_work_id", work["media_id"])
-        cached = cache.get(f"commons_stage_v{POLICY_VERSION}_{identifier}")
-        if (
-            cached is not None
-            and cached.get("work_revision") == work.get("work_revision")
-            and cached.get("work_forms") == list(work["stage_forms"])
-        ):
-            continue
-        filenames = list(
-            dict.fromkeys(
-                filename
-                for filename in work.get("artwork_candidates", [])
-                if isinstance(filename, str)
-            )
-        )[:5]
-        if filenames:
-            pending.append(filenames)
-    resolver = (
-        PageFiles([filename for filenames in pending for filename in filenames])
-        if len(pending) > 1
-        else None
-    )
-    token = _page_files.set(resolver)
-    try:
-        yield
-    finally:
-        _page_files.reset(token)
-
-
-def image_pages(filenames):
-    """Fetch complete file metadata, reusing page batches when available."""
-    resolver = _page_files.get()
-    if resolver is not None:
-        yield from resolver.read(filenames)
-        return
-    for offset in range(0, len(filenames), 3):
-        pages, _aliases = file_metadata(filenames[offset : offset + 3])
-        yield from pages
-
-
-def artwork(
-    work_id,
-    filenames,
-    revision,
-    work_forms=(),
-):
-    """Preserve the distinction between unavailable and confirmed absent images."""
-    try:
-        return select_artwork(
-            work_id,
-            filenames,
-            revision,
-            work_forms,
-        )
-    except ArtworkUnavailableError:
-        return None
-
-
-def described_poster(description):
-    """Recognize affirmative poster descriptions, not incidental poster mentions."""
-    return bool(
-        re.match(
-            r"^(?:(?:a|the)\s+)?poster\s+(?:for|of)\b",
-            description.strip(),
-            re.IGNORECASE,
-        )
-    )
-
-
-def unrelated_portrait(page):
-    """Identify person-only images while allowing explicit stage/character context."""
-    info = next(iter(page.get("imageinfo", [])), {})
-    metadata = info.get("extmetadata", {})
-    source_description = text(metadata.get("ImageDescription", {}).get("value", ""))
-    description = source_description.casefold()
-    if re.search(
-        r"\b(?i:actor|actress|dancer)(?: [\w'-]+){0,4} as [A-Z][\w'-]*\b",
-        source_description,
-    ):
-        return False
-    if re.search(
-        r"\b(?:performing|performance|production|poster|in character|"
-        r"as (?:the |a )?[^.]*character|in the role of)\b",
-        description,
-    ):
-        return False
-    if re.match(
-        r"^(?:a |the )?(?:portrait|headshot) of (?:the |an? )?(?:author|"
-        r"composer|choreographer|actor|actress|dancer|playwright)\b",
-        description,
-    ):
-        return True
-    subject = text(metadata.get("ObjectName", {}).get("value", "")).casefold()
-    categories = [entry.get("title", "") for entry in page.get("categories", [])]
-    categories.extend(metadata.get("Categories", {}).get("value", "").split("|"))
-    person_category = any(
-        re.fullmatch(
-            re.escape(subject)
-            + r" \((?:dancer|choreographer|actor|actress|composer|playwright|writer)\)",
-            category.casefold().removeprefix("category:"),
-        )
-        for category in categories
-    )
-    return bool(
-        subject
-        and person_category
-        and re.match(re.escape(subject) + r" (?:at|in)\b", description)
-    )
-
-
-def suitable_for_work(page, work_forms):
-    """Reject explicit adaptation/form conflicts independently of image rights."""
-    info = next(iter(page.get("imageinfo", [])), {})
-    description = text(
-        info.get("extmetadata", {}).get("ImageDescription", {}).get("value", "")
-    ).casefold()
-    if unrelated_portrait(page):
-        return False
-    if re.search(r"\badvertisement\b", description) and not described_poster(
-        description
-    ):
-        return False
-    if re.search(
-        r"\b(audience|coin|rewrite|parody|adaptation|"
-        r"stage set|set design|front stage|film)\b",
-        description,
-    ):
-        return False
-    return not any(
-        re.search(rf"\b{form}\b", description) and form not in work_forms
-        for form in ("opera", "ballet", "musical")
-    )
-
-
-def verified_candidates(filenames, work_forms):
-    """Keep complete verified candidates if a later optional batch is unavailable."""
-    candidates = []
-    try:
-        for page in image_pages(filenames):
-            if not suitable_for_work(page, work_forms):
-                continue
-            candidate = qualified_image(page)
-            if candidate:
-                candidates.append(candidate)
-    except ArtworkUnavailableError:
-        return candidates, True
-    return candidates, False
-
-
-def normalized_words(value):
-    """Normalize spelling and punctuation without fuzzy title/name equivalence."""
-    return " ".join(
-        re.findall(r"[^\W_]+", unicodedata.normalize("NFKC", value).casefold())
-    )
-
-
-def category_match(page, context, work_forms):
-    """Require an explicit depicted-work title, form and creator description."""
-    info = next(iter(page.get("imageinfo", [])), {})
-    description = text(
-        info.get("extmetadata", {}).get("ImageDescription", {}).get("value", "")
-    )
-    normalized = normalized_words(description)
-    for title in context.get("titles", [])[:16]:
-        for creator in context.get("creators", [])[:32]:
-            if len(normalized_words(creator).split()) < MIN_CREATOR_WORDS:
-                continue
-            for form in work_forms:
-                if form not in {"play", "opera", "musical", "ballet"}:
-                    continue
-                pattern = (
-                    r"^(?:illustration|photograph|photo|poster|scene|performance) "
-                    r"(?:of|from|for) "
-                    + re.escape(normalized_words(title))
-                    + r" (?:a |an )?"
-                    + form
-                    + " by "
-                    + re.escape(normalized_words(creator))
-                    + r"(?=$| illustrator | photographed | published | performed | at )"
-                )
-                if re.search(pattern, normalized):
-                    return {
-                        "matched_title": title,
-                        "matched_creator": creator,
-                        "matched_form": form,
-                        "match_description": description,
-                        "match_source_html": info["extmetadata"]["ImageDescription"][
-                            "value"
-                        ],
-                    }
-    return None
-
-
-def complete_category_evidence(artwork):
-    """Check imported category evidence for completeness and internal consistency."""
-    text_fields = (
-        "category_title",
-        "category_work_id",
-        "matched_title",
-        "matched_creator",
-        "matched_form",
-        "match_description",
-        "match_source_html",
-    )
-    if any(
-        not isinstance(artwork.get(key), str) or not artwork[key] for key in text_fields
-    ):
-        return False
-    if any(
-        type(artwork.get(key)) is not int or artwork[key] <= 0
-        for key in ("category_id", "category_revision")
-    ):
-        return False
-    if (
-        not artwork["category_title"].startswith("Category:")
-        or artwork["category_work_id"]
-        != artwork.get("evidence_work_id", artwork.get("work_id"))
-        or not isinstance(artwork.get("work_forms"), list)
-        or artwork["matched_form"] not in artwork["work_forms"]
-        or credit_text(artwork["match_source_html"])
-        != artwork["rights"].get("ImageDescription")
-    ):
-        return False
-    page = {
-        "imageinfo": [
-            {
-                "extmetadata": {
-                    "ImageDescription": {"value": artwork["match_source_html"]}
-                }
-            }
-        ]
-    }
-    match = category_match(
-        page,
-        {
-            "titles": [artwork["matched_title"]],
-            "creators": [artwork["matched_creator"]],
-        },
-        [artwork["matched_form"]],
-    )
-    return (
-        bool(match)
-        and all(artwork.get(key) == value for key, value in match.items())
-        and suitable_for_work(page, artwork["work_forms"])
-    )
-
-
-def artwork_preference(candidate):
-    """Rank explicit poster descriptions ahead of title hints and portrait fit."""
-    description = candidate["description"].strip()
-    if described_poster(description):
-        poster_rank = 0
-    elif not description and re.search(
-        r"\bposter\b", candidate["title"].replace("_", " "), re.IGNORECASE
-    ):
-        poster_rank = 1
+            cache.set("commons_retry_after", "limited", 60)
+        return dict.fromkeys(filenames)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return dict.fromkeys(filenames)
     else:
-        poster_rank = NON_POSTER_RANK
-    return (
-        poster_rank,
-        abs(candidate["width"] / candidate["height"] - 2 / 3),
-        candidate["page_id"],
-    )
+        return result
 
 
-def select_artwork(
-    work_id,
-    filenames,
-    revision,
-    work_forms,
-):
-    """Select a reusable work image from at most five direct candidates."""
-    filenames = list(
-        dict.fromkeys(filename for filename in filenames if isinstance(filename, str))
-    )[:5]
-    key = f"commons_stage_v{POLICY_VERSION}_{work_id}"
-    cached = cache.get(key)
-    if (
-        cached is not None
-        and cached.get("work_revision") == revision
-        and cached.get("work_forms") == list(work_forms)
-    ):
-        return cached
-    candidates, unavailable = verified_candidates(filenames, work_forms)
-    for candidate in candidates:
-        candidate["evidence"] = "P18/P154"
-    if not candidates and unavailable:
-        raise ArtworkUnavailableError
-    candidates.sort(key=artwork_preference)
-    selected = candidates[0] if candidates else {}
-    if selected:
-        selected.update(
-            work_id=work_id,
-            work_revision=revision,
-            work_forms=list(work_forms),
-            selection_complete=not unavailable,
-            poster_search_complete=True,
+def require_available(metadata):
+    """Keep explicit sync from overwriting saved images during an outage."""
+    if metadata.get("artwork_unavailable"):
+        raise services.ProviderAPIError(
+            Sources.WIKIDATA.value,
+            ValueError(),
+            "Artwork provider unavailable. Please retry sync later",
         )
-        if not unavailable:
-            cache.set(key, selected, 3600)
-    return selected

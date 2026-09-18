@@ -161,103 +161,6 @@ class StageExportRestoreTest(TestCase):
                         result,
                     )
 
-    def test_older_pd_art_export_gains_caveat_without_losing_image(self):
-        """Older credits retain images and gain any required reproduction caveat."""
-        fixture = json.loads(
-            (
-                Path(__file__).parents[2] / "app/tests/mock_data/stage_artwork.json"
-            ).read_text()
-        )
-        fixture["commons"]["query"]["pages"]["123"]["templates"].append(
-            {"title": "Template:PD-Art"}
-        )
-        user = get_user_model().objects.create_user(username="legacy-art-owner")
-        self.client.force_login(user)
-
-        def source_response(url, **_kwargs):
-            response = requests.Response()
-            response.status_code = 200
-            response._content = json.dumps(
-                fixture["commons"]
-                if "commons.wikimedia.org" in url
-                else {"entities": {"Q822850": fixture["work"]}}
-            ).encode()
-            return response
-
-        with patch("app.providers.services.session.get", side_effect=source_response):
-            self.client.post(
-                reverse("media_save"),
-                {
-                    "media_id": "Q822850",
-                    "media_type": "stage",
-                    "source": "wikidata",
-                    "status": "Completed",
-                },
-            )
-        content = b"".join(self.client.get(reverse("export_csv")).streaming_content)
-        rows = list(csv.DictReader(StringIO(content.decode())))
-        artwork = json.loads(rows[0]["stage_artwork"])
-        for policy, notices, supports_cc in (
-            (6, "", True),
-            (8, artwork["notices"], True),
-            (9, artwork["notices"], True),
-            (10, artwork["notices"], True),
-            (10, artwork["notices"], False),
-            (11, artwork["notices"], True),
-            (11, artwork["notices"], False),
-        ):
-            with self.subTest(policy=policy, supports_cc=supports_cc):
-                legacy_artwork = {
-                    **artwork,
-                    "policy": policy,
-                    "notices": notices,
-                    "source_tags": [
-                        *[
-                            tag
-                            for tag in artwork["source_tags"]
-                            if supports_cc or tag != "template:cc-by-sa-4.0"
-                        ],
-                        "template:pd-us",
-                    ],
-                    "credit": "Theatre Magazine, January 1919",
-                    "rights": {
-                        **artwork["rights"],
-                        "Copyrighted": "False",
-                        "Credit": "Theatre Magazine, January 1919",
-                    },
-                }
-                rows[0]["stage_artwork"] = json.dumps(legacy_artwork)
-                legacy = StringIO()
-                writer = csv.DictWriter(legacy, fieldnames=rows[0].keys())
-                writer.writeheader()
-                writer.writerows(rows)
-                Item.objects.get(media_id="Q822850").delete()
-                with patch(
-                    "app.providers.services.session.get",
-                    side_effect=AssertionError("Restore must stay offline"),
-                ):
-                    self.client.post(
-                        reverse("import_yamtrack"),
-                        {
-                            "mode": "new",
-                            "yamtrack_csv": SimpleUploadedFile(
-                                "legacy.csv", legacy.getvalue().encode()
-                            ),
-                        },
-                    )
-                restored = Item.objects.get(media_id="Q822850")
-                if not supports_cc:
-                    self.assertEqual(restored.stage_artwork, {})
-                    self.assertNotEqual(restored.image, artwork["image"])
-                    continue
-                self.assertEqual(restored.image, artwork["image"])
-                self.assertIn("PD-Art", restored.stage_artwork["notices"])
-                self.assertEqual(restored.stage_artwork["artist"], "Test Photographer")
-                self.assertEqual(restored.stage_artwork["license"], "CC BY-SA 4.0")
-                self.assertEqual(
-                    restored.stage_artwork["credit"], "Theatre Magazine, January 1919"
-                )
-
     def test_provider_artwork_round_trip_offline(self):
         """A licensed provider image keeps its credit through offline restore."""
         fixture = json.loads(
@@ -340,20 +243,15 @@ class StageExportRestoreTest(TestCase):
         self._assert_invalid_legacy_credits_omit_images(content)
 
     def _assert_invalid_legacy_credits_omit_images(self, content):
-        """Legacy records cannot bypass author or public-domain evidence checks."""
-        for legacy_change in ("missing_artist", "unverified_public_domain"):
+        """Unsupported development records lose imagery, never attendance."""
+        for legacy_change in ("missing_schema", "development_schema"):
             with self.subTest(legacy_change=legacy_change):
                 rows = list(csv.DictReader(StringIO(content.decode())))
                 artwork = json.loads(rows[0]["stage_artwork"])
-                artwork["policy"] = 3
-                if legacy_change == "missing_artist":
-                    artwork["artist"] = ""
-                    artwork["rights"]["Artist"] = ""
+                if legacy_change == "missing_schema":
+                    artwork.pop("schema")
                 else:
-                    artwork["license"] = "Public domain"
-                    artwork["license_url"] = (
-                        "https://commons.wikimedia.org/wiki/Template:pd-textlogo"
-                    )
+                    artwork["schema"] = "development-format"
                 rows[0]["stage_artwork"] = json.dumps(artwork)
                 invalid = StringIO()
                 writer = csv.DictWriter(invalid, fieldnames=rows[0].keys())

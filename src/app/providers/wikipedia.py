@@ -1,6 +1,5 @@
 """Exact-work Wikipedia article thumbnails with explicit source rights metadata."""
 
-import re
 from time import monotonic
 from urllib.parse import quote, unquote, urlsplit
 
@@ -10,7 +9,7 @@ from django.utils import timezone
 
 from app.providers import commons, services
 
-VERSION = 1
+VERSION = 2
 LANGUAGES = ("en", "fr", "de", "es", "it", "nl")
 FILE_NAMESPACES = {
     "en": "File",
@@ -24,11 +23,7 @@ LANGUAGE_LIMIT = 3
 REQUEST_LIMIT = 12
 TIME_LIMIT = 20
 THUMBNAIL_WIDTH = 300
-NON_FREE_NOTICE = (
-    "Non-free copyrighted artwork. Wikipedia supplies a use-specific rationale, "
-    "not a transferable license. Display here does not establish fair use for "
-    "another context or jurisdiction. Rights remain with the copyright holder."
-)
+FILE_NAMESPACE = 6
 
 
 class UnavailableError(Exception):
@@ -142,84 +137,21 @@ def valid_file_source(url, language, file_page):
 
 
 def build_artwork(work_id, language, article, file_page):
-    """Retain article identity and source rights without granting reuse rights."""
-    info = file_page["imageinfo"][0]
+    """Use the exact article's representative image and source-provided credits."""
     expected_host = (
         "commons.wikimedia.org"
         if file_page.get("imagerepository") == "shared"
         else f"{language}.wikipedia.org"
     )
-    rights = {
-        key: commons.credit_text(value["value"], source_base=f"https://{expected_host}")
-        for key, value in info["extmetadata"].items()
-    }
-    image = info.get("thumburl", "")
-    parsed = urlsplit(image)
-    source_url = info.get("descriptionurl", "")
-    if (
-        parsed.scheme != "https"
-        or parsed.netloc not in {"upload.wikimedia.org", "thumb.wikimedia.org"}
-        or not parsed.path.startswith(
-            (f"/wikipedia/{language}/", "/wikipedia/commons/")
-        )
-        or parsed.fragment
-        or not commons.safe_url(source_url, expected_host)
-        or not valid_file_source(source_url, language, file_page)
-        or info.get("mime") not in {"image/jpeg", "image/png", "image/webp"}
-        or min(info["width"], info["height"], info["thumbwidth"], info["thumbheight"])
-        <= 0
-        or info["thumbwidth"] > THUMBNAIL_WIDTH
-        or "badfile" in info
-        or rights.get("DeletionReason")
-        or not rights.get("LicenseShortName")
-        or commons.unrelated_portrait(file_page)
-    ):
+    info = file_page["imageinfo"][0]
+    if not valid_file_source(info.get("descriptionurl", ""), language, file_page):
         return {}
-    non_free = (
-        rights.get("NonFree", "").casefold() == "true"
-        or "fair use" in rights["LicenseShortName"].casefold()
+    return commons.from_file(
+        file_page,
+        work_id,
+        source_host=expected_host,
+        article_url=page_url(language, article["title"]),
     )
-    license_url = rights.get("LicenseUrl", "")
-    if license_url.startswith("//"):
-        license_url = "https:" + license_url
-    if not any(
-        commons.safe_url(license_url, host)
-        for host in (expected_host, "creativecommons.org")
-    ):
-        license_url = source_url
-    return {
-        "provider": "wikipedia",
-        "policy": VERSION,
-        "work_id": work_id,
-        "image": image,
-        "source_url": source_url,
-        "title": file_page["title"].removeprefix("File:"),
-        "artist": rights.get("Artist", ""),
-        "credit": rights.get("Credit", ""),
-        "attribution": rights.get("Attribution", ""),
-        "permission": rights.get("Permission", ""),
-        "license": "Non-free; Wikipedia rationale"
-        if non_free
-        else rights["LicenseShortName"],
-        "license_url": source_url if non_free else license_url,
-        "non_free": non_free,
-        "rights": rights,
-        "basis_notice": NON_FREE_NOTICE
-        if non_free
-        else "Use is subject to the source file's license and notices.",
-        "notices": " ".join(
-            rights.get(key, "")
-            for key in ("UsageTerms", "Restrictions", "LicenseNotices")
-        ).strip(),
-        "article_url": page_url(language, article["title"]),
-        "language": language,
-        "evidence": "Wikipedia article QID and PageImages",
-        "selection_complete": True,
-        "poster_search_complete": True,
-        "article": article,
-        "file": file_page,
-        "selected_filename": article["pageimage"],
-    }
 
 
 def checked_artwork(work_id, language, article, file_page):
@@ -229,27 +161,10 @@ def checked_artwork(work_id, language, article, file_page):
             return {}
         if (
             "disambiguation" in article["pageprops"]
-            or file_page["ns"] != commons.FILE_NAMESPACE
+            or file_page["ns"] != FILE_NAMESPACE
         ):
             return {}
-        records = (
-            (article,)
-            if file_page.get("imagerepository") == "shared"
-            else (article, file_page)
-        )
-        for record in records:
-            if (
-                type(record["pageid"]) is not int
-                or record["pageid"] <= 0
-                or type(record["lastrevid"]) is not int
-            ):
-                raise UnavailableError
         if file_page.get("imagerepository") not in {"local", "shared"}:
-            raise UnavailableError
-        if (
-            not isinstance(file_page["imageinfo"][0].get("sha1"), str)
-            or not file_page["imageinfo"][0]["sha1"]
-        ):
             raise UnavailableError
         return build_artwork(work_id, language, article, file_page)
     except (KeyError, TypeError, ValueError, IndexError, AttributeError) as error:
@@ -372,13 +287,6 @@ def artworks(works):
     return result
 
 
-def incomplete(artwork):
-    """Distinguish confirmed absence from a failed or partial article selection."""
-    return artwork is None or (
-        bool(artwork) and not artwork.get("selection_complete", True)
-    )
-
-
 def cache_results(result, pending, failures):
     """Cache complete selections and mark incomplete per-work results retryable."""
     for identifier, (signature, _links) in pending.items():
@@ -386,7 +294,7 @@ def cache_results(result, pending, failures):
             result[identifier]["retrieved_at"] = timezone.now().isoformat()
         if identifier in failures:
             result[identifier] = (
-                {**result[identifier], "selection_complete": False}
+                {**result[identifier], "lookup_incomplete": "yes"}
                 if result[identifier]
                 else None
             )
@@ -396,40 +304,3 @@ def cache_results(result, pending, failures):
                 {"signature": signature, "artwork": result[identifier]},
                 3600,
             )
-
-
-def restored_artwork(artwork, work_id, image):
-    """Restore source assertions without certifying fair use or global identity."""
-    if (
-        not isinstance(artwork, dict)
-        or artwork.get("provider") != "wikipedia"
-        or artwork.get("policy") != VERSION
-    ):
-        return {}
-    language = artwork.get("language")
-    evidence_id = artwork.get("evidence_work_id", work_id)
-    if (
-        language not in LANGUAGES
-        or not isinstance(evidence_id, str)
-        or not re.fullmatch(r"Q[1-9][0-9]*", evidence_id)
-    ):
-        return {}
-    try:
-        expected = checked_artwork(
-            evidence_id, language, artwork["article"], artwork["file"]
-        )
-    except (UnavailableError, KeyError):
-        return {}
-    if (
-        not expected
-        or artwork.get("work_id") != work_id
-        or artwork.get("image") != image
-    ):
-        return {}
-    if not isinstance(artwork.get("retrieved_at"), str) or any(
-        artwork.get(key) != value
-        for key, value in expected.items()
-        if key not in {"work_id", "selection_complete"}
-    ):
-        return {}
-    return artwork.copy()

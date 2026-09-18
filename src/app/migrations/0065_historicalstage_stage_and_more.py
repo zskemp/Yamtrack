@@ -27,6 +27,9 @@ class Migration(migrations.Migration):
                 ('start_date', models.DateTimeField(blank=True, null=True)),
                 ('end_date', models.DateTimeField(blank=True, null=True)),
                 ('notes', models.TextField(blank=True, default='')),
+                ('location', models.CharField(blank=True, default='', max_length=255)),
+                ('production', models.CharField(blank=True, default='', max_length=500)),
+                ('venue', models.CharField(blank=True, default='', max_length=255)),
                 ('history_id', models.AutoField(primary_key=True, serialize=False)),
                 ('history_date', models.DateTimeField(db_index=True)),
                 ('history_change_reason', models.CharField(max_length=100, null=True)),
@@ -52,6 +55,9 @@ class Migration(migrations.Migration):
                 ('start_date', models.DateTimeField(blank=True, null=True)),
                 ('end_date', models.DateTimeField(blank=True, null=True)),
                 ('notes', models.TextField(blank=True, default='')),
+                ('location', models.CharField(blank=True, default='', max_length=255)),
+                ('production', models.CharField(blank=True, default='', max_length=500)),
+                ('venue', models.CharField(blank=True, default='', max_length=255)),
             ],
             options={
                 'verbose_name_plural': 'stage',
@@ -91,5 +97,33 @@ class Migration(migrations.Migration):
             model_name='stage',
             name='user',
             field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to=settings.AUTH_USER_MODEL),
+        ),
+        migrations.RemoveConstraint(
+            model_name='item',
+            name='app_item_source_valid',
+        ),
+        migrations.AlterField(
+            model_name='item',
+            name='source',
+            field=models.CharField(choices=[('tmdb', 'The Movie Database'), ('mal', 'MyAnimeList'), ('mangaupdates', 'MangaUpdates'), ('igdb', 'Internet Game Database'), ('openlibrary', 'Open Library'), ('hardcover', 'Hardcover'), ('comicvine', 'Comic Vine'), ('bgg', 'BoardGameGeek'), ('wikidata', 'Wikidata'), ('manual', 'Manual')], max_length=20),
+        ),
+        migrations.AddConstraint(
+            model_name='item',
+            constraint=models.CheckConstraint(condition=models.Q(('source__in', ['tmdb', 'mal', 'mangaupdates', 'igdb', 'openlibrary', 'hardcover', 'comicvine', 'bgg', 'wikidata', 'manual'])), name='app_item_source_valid'),
+        ),
+        migrations.AddField(
+            model_name='item',
+            name='stage_artwork',
+            field=models.JSONField(blank=True, default=dict),
+        ),
+        migrations.CreateModel(
+            name='StageRedirect',
+            fields=[
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('alias_id', models.CharField(max_length=36, unique=True)),
+                ('canonical_id', models.CharField(max_length=36)),
+                ('revision', models.PositiveBigIntegerField()),
+                ('observed_at', models.DateTimeField(auto_now=True)),
+            ],
         ),
     ]

@@ -7,7 +7,6 @@ from django.contrib.admin.sites import AlreadyRegistered
 from app.models import (
     Episode,
     Item,
-    StageRedirect,
     UserMessage,
 )
 
@@ -46,26 +45,6 @@ class UserMessageAdmin(admin.ModelAdmin):
     list_filter = ["level", "shown_at"]
 
 
-@admin.register(StageRedirect)
-class StageRedirectAdmin(admin.ModelAdmin):
-    """Inspect provider evidence without manually asserting new equivalences."""
-
-    list_display = ["alias_id", "canonical_id", "revision", "observed_at"]
-    readonly_fields = list_display
-
-    def has_add_permission(self, request):  # noqa: ARG002
-        """Only provider responses may establish redirects."""
-        return False
-
-    def has_change_permission(self, request, obj=None):  # noqa: ARG002
-        """Keep observed identity evidence immutable through admin."""
-        return False
-
-    def has_delete_permission(self, request, obj=None):  # noqa: ARG002
-        """Do not invalidate saved identity through admin deletion."""
-        return False
-
-
 class MediaAdmin(admin.ModelAdmin):
     """Custom admin for regular media model with search and filter options."""
 
@@ -79,7 +58,7 @@ class MediaAdmin(admin.ModelAdmin):
 
 # Auto-register remaining models
 app_models = apps.get_app_config("app").get_models()
-SpecialModels = ["Item", "Episode", "BasicMedia", "UserMessage"]
+SpecialModels = ["Item", "Episode", "BasicMedia", "UserMessage", "StageRedirect"]
 for model in app_models:
     if (
         not model.__name__.startswith("Historical")
